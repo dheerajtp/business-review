@@ -1,4 +1,4 @@
--- Fairobuy v1 schema. See SPEC.md. RLS is the authorization boundary;
+-- TapReview v1 schema. See SPEC.md. RLS is the authorization boundary;
 -- anonymous customers only ever touch the three RPCs at the bottom.
 
 create table public.categories (

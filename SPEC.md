@@ -1,4 +1,4 @@
-# Fairobuy: NFC Feedback Platform, v1 Spec
+# TapReview: NFC Feedback Platform, v1 Spec
 
 Status: DRAFT, awaiting approval. Repository is empty; stack is `react-supabase` (STACK_CONFIG.md). No custom Node backend.
 

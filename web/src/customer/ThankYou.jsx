@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { googleReviewUrl } from '../lib/format';
 import { supabase } from '../lib/supabase';
+import Stars from '../ui/Stars';
 
 export default function ThankYou({ form, draft, submissionId }) {
   const [copied, setCopied] = useState(false);
@@ -17,6 +18,12 @@ export default function ThankYou({ form, draft, submissionId }) {
     }
   }
 
+  // Google's review form cannot be pre-filled, so copy the comment as the customer leaves for it.
+  function openGoogle() {
+    if (comment) void copy();
+    void supabase.rpc('mark_google_click', { p_id: submissionId });
+  }
+
   return (
     <main className="thanks">
       <h1>Thank you!</h1>
@@ -26,10 +33,13 @@ export default function ThankYou({ form, draft, submissionId }) {
         <section className="choice" aria-labelledby="g-h">
           <h2 id="g-h">Share it on Google</h2>
           <p className="muted">A public review helps other people find {form.company_name}. It takes about a minute.</p>
+          <p className="small">
+            Your rating: <Stars rating={draft.rating} /> Google will ask for the stars again, so tap the same ones.
+          </p>
           {comment && (
             <>
               <p className="small" style={{ background: 'var(--bg)', padding: 12, borderRadius: 8, whiteSpace: 'pre-wrap' }}>{comment}</p>
-              <button type="button" className="btn" onClick={() => void copy()}>{copied ? 'Copied ✓' : 'Copy my comment'}</button>
+              <button type="button" className="btn" onClick={() => void copy()}>{copied ? 'Copied ✓ Paste it on Google' : 'Copy my comment'}</button>
             </>
           )}
           <a
@@ -37,7 +47,7 @@ export default function ThankYou({ form, draft, submissionId }) {
             href={googleReviewUrl(form.google_place_id)}
             target="_blank"
             rel="noopener noreferrer"
-            onClick={() => void supabase.rpc('mark_google_click', { p_id: submissionId })}
+            onClick={openGoogle}
           >
             Write a Google review
           </a>
@@ -53,7 +63,7 @@ export default function ThankYou({ form, draft, submissionId }) {
           </section>
         )}
       </div>
-      <span className="sr-only" role="status">{copied ? 'Comment copied to clipboard' : ''}</span>
+      <span className="sr-only" role="status">{copied ? 'Comment copied to clipboard. Paste it into the Google review box.' : ''}</span>
     </main>
   );
 }

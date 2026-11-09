@@ -1,4 +1,4 @@
-# Fairobuy
+# TapReview
 
 NFC / QR customer feedback for multi-branch businesses. Spec: [SPEC.md](SPEC.md).
 Stack: React + Vite (plain JavaScript), Supabase (Postgres + RLS + Auth + one Edge Function).
