@@ -3,7 +3,7 @@ import { Link } from 'react-router-dom';
 // Steps in setup order. `done` comes from simple counts of what already exists.
 const STEPS = [
   ['categories', 'Create a category', 'A type of business, such as Café or Boutique.', '/admin/categories'],
-  ['questions', 'Add the questions', 'What customers are asked for each category.', '/admin/questions'],
+  ['keywords', 'Review categories and keywords', 'Subcategories and the keywords customers can pick.', '/admin/categories'],
   ['companies', 'Add a company', 'One for each business you serve.', '/admin/companies'],
   ['branches', 'Add its branches', 'Each branch gets its own NFC link and QR code.', '/admin/companies'],
   ['logins', 'Create a business login', 'So the company can see its own feedback.', '/admin/companies'],

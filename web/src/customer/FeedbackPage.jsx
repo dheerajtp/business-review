@@ -29,13 +29,16 @@ export default function FeedbackPage({ slug }) {
     const { data, error: e } = await supabase.rpc('submit_feedback', {
       p_slug: slug,
       p_rating: draft.rating,
-      p_answers: draft.answers,
+      p_keyword_ids: draft.keywordIds,
       p_comment: draft.comment,
       p_contact: draft.contact,
     });
     setSubmitting(false);
-    if (e) setError('We could not send your feedback. Please check your connection and try again.');
-    else setSubmissionId(data );
+    if (e) {
+      setError(e.code === '22023'
+        ? 'Please check your selection and try again'
+        : 'We could not send your feedback. Please check your connection and try again.');
+    } else setSubmissionId(data );
   }
 
   if (load.s === 'loading') {

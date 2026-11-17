@@ -3,6 +3,33 @@
 create temp table _ids (k text primary key, v uuid);
 grant all on _ids to anon, authenticated;
 
+\echo '--- seed: 8 categories, C4 subcategories, 6-8 active keywords each, idempotent'
+do $$ begin
+  assert (select count(*) from categories) = 8, 'seed has 8 categories, got ' || (select count(*) from categories);
+  assert (select count(*) from subcategories) = 29, 'seed has 29 subcategories, got ' || (select count(*) from subcategories);
+  assert (select count(*) from subcategories s join categories c on c.id = s.category_id
+          where c.name = 'Restaurants & Cafes') = 5, 'Restaurants & Cafes has 5 subcategories';
+  assert not exists (
+    select 1 from subcategories s
+    where (select count(*) from keywords w where w.subcategory_id = s.id and w.is_active) not between 6 and 8
+  ), 'every subcategory has 6-8 active keywords';
+  assert not exists (select 1 from categories c where not exists (select 1 from subcategories s where s.category_id = c.id)),
+    'every category has subcategories';
+end $$;
+create temp table _seed_counts as
+  select (select count(*) from categories) c, (select count(*) from subcategories) s, (select count(*) from keywords) k;
+-- re-running seed-style inserts (any letter case) changes nothing
+insert into categories (name) values ('RETAIL') on conflict do nothing;
+insert into subcategories (category_id, name)
+  select id, 'cafe' from categories where name = 'Restaurants & Cafes' on conflict do nothing;
+insert into keywords (subcategory_id, label)
+  select s.id, 'coffee QUALITY' from subcategories s where s.name = 'Cafe' on conflict do nothing;
+do $$ begin
+  assert (select c from _seed_counts) = (select count(*) from categories), 'seed re-run added a category';
+  assert (select s from _seed_counts) = (select count(*) from subcategories), 'seed re-run added a subcategory';
+  assert (select k from _seed_counts) = (select count(*) from keywords), 'seed re-run added a keyword';
+end $$;
+
 insert into auth.users (id, email) values
   ('00000000-0000-0000-0000-0000000000a1', 'super@x'),
   ('00000000-0000-0000-0000-0000000000b1', 'cafe@x'),
@@ -11,9 +38,28 @@ insert into auth.users (id, email) values
 insert into categories (id, name) values
   ('10000000-0000-0000-0000-000000000001', 'Cafe'),
   ('10000000-0000-0000-0000-000000000002', 'Boutique');
-insert into companies (id, name, category_id) values
-  ('20000000-0000-0000-0000-000000000001', 'Brew Co', '10000000-0000-0000-0000-000000000001'),
-  ('20000000-0000-0000-0000-000000000002', 'Silk House', '10000000-0000-0000-0000-000000000002');
+insert into subcategories (id, category_id, name) values
+  ('50000000-0000-0000-0000-000000000001', '10000000-0000-0000-0000-000000000001', 'Espresso bar'),
+  ('50000000-0000-0000-0000-000000000002', '10000000-0000-0000-0000-000000000002', 'Sarees'),
+  ('50000000-0000-0000-0000-000000000003', '10000000-0000-0000-0000-000000000001', 'Tea room');
+-- Espresso bar: 9 active keywords (one more than the submit cap) + 1 archived.
+insert into keywords (id, subcategory_id, label, sort_order, is_active) values
+  ('60000000-0000-0000-0000-000000000001', '50000000-0000-0000-0000-000000000001', 'Coffee', 1, true),
+  ('60000000-0000-0000-0000-000000000002', '50000000-0000-0000-0000-000000000001', 'Ambience', 2, true),
+  ('60000000-0000-0000-0000-000000000003', '50000000-0000-0000-0000-000000000001', 'Staff', 3, true),
+  ('60000000-0000-0000-0000-000000000004', '50000000-0000-0000-0000-000000000001', 'Old menu', 4, false),
+  ('60000000-0000-0000-0000-000000000007', '50000000-0000-0000-0000-000000000001', 'Seating', 5, true),
+  ('60000000-0000-0000-0000-000000000008', '50000000-0000-0000-0000-000000000001', 'Music', 6, true),
+  ('60000000-0000-0000-0000-000000000009', '50000000-0000-0000-0000-000000000001', 'Wifi', 7, true),
+  ('60000000-0000-0000-0000-00000000000a', '50000000-0000-0000-0000-000000000001', 'Cleanliness', 8, true),
+  ('60000000-0000-0000-0000-00000000000b', '50000000-0000-0000-0000-000000000001', 'Pastries', 9, true),
+  -- same sort_order as Pastries: ties are broken by label, so Location comes before Pastries
+  ('60000000-0000-0000-0000-00000000000c', '50000000-0000-0000-0000-000000000001', 'Location', 9, true),
+  ('60000000-0000-0000-0000-000000000005', '50000000-0000-0000-0000-000000000002', 'Fabric', 1, true),
+  ('60000000-0000-0000-0000-000000000006', '50000000-0000-0000-0000-000000000003', 'Tea', 1, true);
+insert into companies (id, name, subcategory_id) values
+  ('20000000-0000-0000-0000-000000000001', 'Brew Co', '50000000-0000-0000-0000-000000000001'),
+  ('20000000-0000-0000-0000-000000000002', 'Silk House', '50000000-0000-0000-0000-000000000002');
 insert into branches (id, company_id, name, slug, google_place_id) values
   ('30000000-0000-0000-0000-000000000001', '20000000-0000-0000-0000-000000000001', 'Brew MG Road', 'brew1', 'PLACE_BREW'),
   ('30000000-0000-0000-0000-000000000002', '20000000-0000-0000-0000-000000000002', 'Silk Mall', 'silk1', 'PLACE_SILK');
@@ -21,11 +67,6 @@ insert into profiles (user_id, role, company_id) values
   ('00000000-0000-0000-0000-0000000000a1', 'super_admin', null),
   ('00000000-0000-0000-0000-0000000000b1', 'business_admin', '20000000-0000-0000-0000-000000000001'),
   ('00000000-0000-0000-0000-0000000000b2', 'business_admin', '20000000-0000-0000-0000-000000000002');
-insert into questions (id, category_id, company_id, text, type, options, is_required, sort_order) values
-  ('40000000-0000-0000-0000-000000000001', '10000000-0000-0000-0000-000000000001', null, 'Coffee quality?', 'scale', null, true, 1),
-  ('40000000-0000-0000-0000-000000000002', '10000000-0000-0000-0000-000000000001', null, 'What did you order?', 'multi', '["Coffee","Food","Dessert"]', false, 2),
-  ('40000000-0000-0000-0000-000000000003', '10000000-0000-0000-0000-000000000001', '20000000-0000-0000-0000-000000000001', 'Brew-only: try the new menu?', 'single', '["Yes","No"]', false, 3),
-  ('40000000-0000-0000-0000-000000000004', '10000000-0000-0000-0000-000000000002', null, 'Fabric quality?', 'scale', null, false, 1);
 
 -- helper: run a statement as a given role / user, expect success or a message fragment
 create function pg_temp.as_user(u text, r text) returns void language plpgsql as $$
@@ -45,52 +86,79 @@ do $$ begin
     ('30000000-0000-0000-0000-000000000001','20000000-0000-0000-0000-000000000001',5);
     raise exception 'FAIL anon insert';
   exception when insufficient_privilege then null; end;
+  begin perform 1 from subcategories; raise exception 'FAIL anon read subcategories';
+  exception when insufficient_privilege then null; end;
+  begin perform 1 from keywords; raise exception 'FAIL anon read keywords';
+  exception when insufficient_privilege then null; end;
+  begin insert into subcategories (category_id, name) values ('10000000-0000-0000-0000-000000000001', 'x');
+    raise exception 'FAIL anon insert subcategory';
+  exception when insufficient_privilege then null; end;
+  begin insert into keywords (subcategory_id, label) values ('50000000-0000-0000-0000-000000000001', 'x');
+    raise exception 'FAIL anon insert keyword';
+  exception when insufficient_privilege then null; end;
+  begin update keywords set label = 'x'; raise exception 'FAIL anon update keyword';
+  exception when insufficient_privilege then null; end;
 end $$;
 
-\echo '--- form RPC: category + company questions, ordered, no leakage'
+\echo '--- form RPC: names, active keywords ordered by sort_order then label, no leakage'
 do $$
 declare f jsonb;
 begin
   f := get_feedback_form('brew1');
   assert f->>'branch_name' = 'Brew MG Road', 'branch name';
+  assert f->>'company_name' = 'Brew Co', 'company name';
   assert f->>'google_place_id' = 'PLACE_BREW', 'place id';
-  assert jsonb_array_length(f->'questions') = 3, 'brew should have 3 questions, got ' || jsonb_array_length(f->'questions');
-  assert f->'questions'->2->>'text' like 'Brew-only%', 'company question last';
+  assert f->>'category_name' = 'Cafe', 'category name';
+  assert f->>'subcategory_name' = 'Espresso bar', 'subcategory name';
+  assert jsonb_array_length(f->'keywords') = 9, 'brew should have 9 active keywords, got ' || jsonb_array_length(f->'keywords');
+  assert f->'keywords'->0 = '{"id": "60000000-0000-0000-0000-000000000001", "label": "Coffee"}'::jsonb, 'first keyword is {id,label}';
+  assert (select array_agg(e->>'label' order by n) from jsonb_array_elements(f->'keywords') with ordinality t(e, n))
+         = array['Coffee','Ambience','Staff','Seating','Music','Wifi','Cleanliness','Location','Pastries'],
+         'ordered by sort_order, label';
+  assert not exists (select 1 from jsonb_array_elements(f->'keywords') e where e->>'label' in ('Old menu', 'Tea', 'Fabric')),
+         'no archived or other-subcategory keywords';
   f := get_feedback_form('silk1');
-  assert jsonb_array_length(f->'questions') = 1, 'silk has 1 question';
+  assert f->'keywords' = '[{"id": "60000000-0000-0000-0000-000000000005", "label": "Fabric"}]'::jsonb, 'silk has 1 keyword';
   assert get_feedback_form('nope') is null, 'unknown slug null';
 end $$;
 
-\echo '--- submit: valid, invalid'
+\echo '--- submit: valid, duplicate, foreign, archived, too many, invalid'
 do $$
-declare id uuid; ok boolean;
+declare id uuid;
 begin
+  -- duplicates are collapsed; order is the order first picked
   id := submit_feedback('brew1', 2,
-    '{"40000000-0000-0000-0000-000000000001": 3, "40000000-0000-0000-0000-000000000002": ["Coffee"]}',
+    array['60000000-0000-0000-0000-000000000002', '60000000-0000-0000-0000-000000000001',
+          '60000000-0000-0000-0000-000000000002']::uuid[],
     'slow service', '98765');
   assert id is not null;
 
-  -- helper to assert an error
-  begin perform submit_feedback('brew1', 0, '{"40000000-0000-0000-0000-000000000001": 3}', null, null);
+  begin perform submit_feedback('brew1', 0, '{}'::uuid[], null, null);
     raise exception 'FAIL rating 0'; exception when sqlstate '22023' then null; end;
-  begin perform submit_feedback('brew1', 6, '{"40000000-0000-0000-0000-000000000001": 3}', null, null);
+  begin perform submit_feedback('brew1', 6, '{}'::uuid[], null, null);
     raise exception 'FAIL rating 6'; exception when sqlstate '22023' then null; end;
-  begin perform submit_feedback('brew1', 5, '{}', null, null);
-    raise exception 'FAIL missing required'; exception when sqlstate '22023' then null; end;
-  begin perform submit_feedback('brew1', 5, '{"40000000-0000-0000-0000-000000000001": 9}', null, null);
-    raise exception 'FAIL scale 9'; exception when sqlstate '22023' then null; end;
-  begin perform submit_feedback('brew1', 5, '{"40000000-0000-0000-0000-000000000004": 3, "40000000-0000-0000-0000-000000000001": 3}', null, null);
-    raise exception 'FAIL other category question'; exception when sqlstate '22023' then null; end;
-  begin perform submit_feedback('brew1', 5, '{"40000000-0000-0000-0000-000000000001": 3, "40000000-0000-0000-0000-000000000003": "Maybe"}', null, null);
-    raise exception 'FAIL bad option'; exception when sqlstate '22023' then null; end;
-  begin perform submit_feedback('brew1', 5, '{"40000000-0000-0000-0000-000000000001": 3, "40000000-0000-0000-0000-000000000002": ["Pizza"]}', null, null);
-    raise exception 'FAIL bad multi'; exception when sqlstate '22023' then null; end;
-  begin perform submit_feedback('brew1', 5, '{"40000000-0000-0000-0000-000000000001": 3}', repeat('x', 2001), null);
+  begin perform submit_feedback('brew1', 5, array['60000000-0000-0000-0000-000000000005']::uuid[], null, null);
+    raise exception 'FAIL keyword of another category'; exception when sqlstate '22023' then null; end;
+  begin perform submit_feedback('brew1', 5, array['60000000-0000-0000-0000-000000000006']::uuid[], null, null);
+    raise exception 'FAIL keyword of another subcategory in the same category'; exception when sqlstate '22023' then null; end;
+  begin perform submit_feedback('brew1', 5,
+    array['60000000-0000-0000-0000-000000000001', '60000000-0000-0000-0000-000000000004']::uuid[], null, null);
+    raise exception 'FAIL archived keyword'; exception when sqlstate '22023' then null; end;
+  begin perform submit_feedback('brew1', 5, array[gen_random_uuid()], null, null);
+    raise exception 'FAIL random keyword id'; exception when sqlstate '22023' then null; end;
+  begin perform submit_feedback('brew1', 5, array[null]::uuid[], null, null);
+    raise exception 'FAIL null keyword id'; exception when sqlstate '22023' then null; end;
+  begin perform submit_feedback('brew1', 5, (select array_agg(e->>'id')::uuid[] from jsonb_array_elements(get_feedback_form('brew1')->'keywords') e), null, null);
+    raise exception 'FAIL 9 keywords'; exception when sqlstate '22023' then
+      assert sqlerrm = 'too many keywords', 'too many message, got ' || sqlerrm; end;
+  begin perform submit_feedback('brew1', 5, '{}'::uuid[], repeat('x', 2001), null);
     raise exception 'FAIL long comment'; exception when sqlstate '22023' then null; end;
-  begin perform submit_feedback('nope', 5, '{}', null, null);
+  begin perform submit_feedback('brew1', 5, '{}'::uuid[], null, repeat('x', 201));
+    raise exception 'FAIL long contact'; exception when sqlstate '22023' then null; end;
+  begin perform submit_feedback('nope', 5, '{}'::uuid[], null, null);
     raise exception 'FAIL unknown slug'; exception when sqlstate 'P0002' then null; end;
-  -- silk question is optional
-  perform submit_feedback('silk1', 5, '{}', null, null);
+  -- keywords are optional; null means none
+  perform submit_feedback('silk1', 5, null, null, null);
   perform mark_google_click(id);
 end $$;
 
@@ -99,59 +167,79 @@ do $$ begin
   assert (select count(*) from feedback_submissions) = 2, 'exactly 2 stored (invalid ones rejected)';
   assert (select clicked_google from feedback_submissions where rating = 2), 'click recorded';
   assert (select company_id from feedback_submissions where rating = 5) = '20000000-0000-0000-0000-000000000002', 'company derived server-side';
-  assert (select answers->0->>'text' from feedback_submissions where rating = 2) = 'Coffee quality?', 'snapshot';
+  assert (select keywords from feedback_submissions where rating = 2) =
+    '[{"id": "60000000-0000-0000-0000-000000000002", "label": "Ambience"},
+      {"id": "60000000-0000-0000-0000-000000000001", "label": "Coffee"}]'::jsonb, 'snapshot, deduped, in submitted order';
+  assert (select keywords from feedback_submissions where rating = 5) = '[]'::jsonb, 'no keywords stored as []';
 end $$;
-
-\echo '--- inactive branch/company/category are hidden and reject'
-update branches set is_active = false where slug = 'silk1';
+-- label snapshot survives a later rename
+update keywords set label = 'Espresso' where id = '60000000-0000-0000-0000-000000000001';
 do $$ begin
-  set local role anon;
-  assert get_feedback_form('silk1') is null;
-  begin perform submit_feedback('silk1', 5, '{}', null, null); raise exception 'FAIL inactive';
-  exception when sqlstate 'P0002' then null; end;
+  assert (select keywords->1->>'label' from feedback_submissions where rating = 2) = 'Coffee', 'label snapshot kept';
 end $$;
-reset role;
-update branches set is_active = true where slug = 'silk1';
+update keywords set label = 'Coffee' where id = '60000000-0000-0000-0000-000000000001';
 
-\echo '--- business admin isolation'
+\echo '--- inactive branch/company/subcategory/category are hidden and reject'
+create function pg_temp.check_silk_hidden(what text) returns void language plpgsql as $$
+begin
+  set local role anon;
+  assert get_feedback_form('silk1') is null, what || ': form should be null';
+  begin perform submit_feedback('silk1', 5, null, null, null); raise exception 'FAIL inactive %', what;
+  exception when sqlstate 'P0002' then null; end;
+  reset role;
+end $$;
+update branches set is_active = false where slug = 'silk1';
+select pg_temp.check_silk_hidden('branch');
+update branches set is_active = true where slug = 'silk1';
+update companies set is_active = false where id = '20000000-0000-0000-0000-000000000002';
+select pg_temp.check_silk_hidden('company');
+update companies set is_active = true where id = '20000000-0000-0000-0000-000000000002';
+update subcategories set is_active = false where id = '50000000-0000-0000-0000-000000000002';
+select pg_temp.check_silk_hidden('subcategory');
+update subcategories set is_active = true where id = '50000000-0000-0000-0000-000000000002';
+update categories set is_active = false where id = '10000000-0000-0000-0000-000000000002';
+select pg_temp.check_silk_hidden('category');
+update categories set is_active = true where id = '10000000-0000-0000-0000-000000000002';
+reset role;
+do $$ begin
+  assert get_feedback_form('silk1') is not null, 'silk visible again';
+end $$;
+
+\echo '--- business admin isolation; taxonomy is read-only'
 select pg_temp.as_user('00000000-0000-0000-0000-0000000000b1', 'authenticated');
 do $$ begin
   assert (select count(*) from feedback_submissions) = 1, 'BA1 sees only own feedback';
   assert (select count(*) from branches) = 1, 'BA1 sees only own branches';
   assert (select count(*) from companies) = 1;
-  assert (select count(*) from question_requests) = 0;
-  assert (select count(*) from questions) = 3, 'BA1 sees category + own questions only';
   assert (select count(*) from branch_stats) = 1, 'stats scoped';
-  begin update branches set google_place_id = 'EVIL' where true; 
+  assert (select count(*) from subcategories) = 32, 'BA reads all subcategories';
+  assert (select count(*) from keywords where subcategory_id = '50000000-0000-0000-0000-000000000001') = 10, 'BA reads keywords';
+  begin update branches set google_place_id = 'EVIL' where true;
     assert (select count(*) from branches where google_place_id = 'EVIL') = 0, 'FAIL BA update branch';
   exception when insufficient_privilege then null; end;
-  begin insert into questions (category_id, text, type) values ('10000000-0000-0000-0000-000000000001', 'x', 'text');
-    raise exception 'FAIL BA insert question'; exception when insufficient_privilege or sqlstate '42501' then null; end;
+  begin insert into subcategories (category_id, name) values ('10000000-0000-0000-0000-000000000001', 'x');
+    raise exception 'FAIL BA insert subcategory'; exception when insufficient_privilege then null; end;
+  begin insert into keywords (subcategory_id, label) values ('50000000-0000-0000-0000-000000000001', 'x');
+    raise exception 'FAIL BA insert keyword'; exception when insufficient_privilege then null; end;
+  update subcategories set name = 'EVIL' where true;
+  assert not exists (select 1 from subcategories where name = 'EVIL'), 'FAIL BA update subcategory';
+  update keywords set label = 'EVIL', is_active = false where true;
+  assert not exists (select 1 from keywords where label = 'EVIL' or not is_active and id <> '60000000-0000-0000-0000-000000000004'),
+    'FAIL BA update keyword';
+  begin delete from keywords; raise exception 'FAIL BA delete keyword';
+  exception when insufficient_privilege then null; end;
   begin delete from feedback_submissions; raise exception 'FAIL BA delete feedback';
   exception when insufficient_privilege then null; end;
   begin update feedback_submissions set rating = 5; raise exception 'FAIL BA update feedback';
-  exception when insufficient_privilege then null; end;
-  -- request for own company ok; for another company / pre-approved denied
-  insert into question_requests (company_id, requested_by, text)
-    values ('20000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-0000000000b1', 'Ask about wifi');
-  begin insert into question_requests (company_id, requested_by, text)
-    values ('20000000-0000-0000-0000-000000000002', '00000000-0000-0000-0000-0000000000b1', 'x');
-    raise exception 'FAIL cross-company request'; exception when sqlstate '42501' then null; end;
-  begin insert into question_requests (company_id, requested_by, text, status)
-    values ('20000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-0000000000b1', 'x', 'approved');
-    raise exception 'FAIL self-approve'; exception when sqlstate '42501' then null; end;
-  begin update question_requests set status = 'approved'; 
-    assert (select count(*) from question_requests where status = 'approved') = 0, 'FAIL BA self-approve via update';
   exception when insufficient_privilege then null; end;
   begin insert into profiles (user_id, role) values (gen_random_uuid(), 'super_admin');
     raise exception 'FAIL BA insert profile'; exception when insufficient_privilege then null; end;
 end $$;
 reset role;
 
-\echo '--- business admin 2 cannot see BA1 request; super sees everything'
+\echo '--- business admin 2 sees only own feedback; super sees everything and edits taxonomy'
 select pg_temp.as_user('00000000-0000-0000-0000-0000000000b2', 'authenticated');
 do $$ begin
-  assert (select count(*) from question_requests) = 0;
   assert (select count(*) from feedback_submissions) = 1;
   assert (select company_id from feedback_submissions) = '20000000-0000-0000-0000-000000000002';
 end $$;
@@ -160,12 +248,20 @@ select pg_temp.as_user('00000000-0000-0000-0000-0000000000a1', 'authenticated');
 do $$ begin
   assert (select count(*) from feedback_submissions) = 2;
   assert (select count(*) from companies) = 2;
-  assert (select count(*) from question_requests) = 1;
-  update question_requests set status = 'approved', reviewed_by = auth.uid();
-  -- company-scoped question must match category
-  begin insert into questions (category_id, company_id, text, type)
-    values ('10000000-0000-0000-0000-000000000002', '20000000-0000-0000-0000-000000000001', 'x', 'text');
-    raise exception 'FAIL category mismatch'; exception when raise_exception then null; end;
+  insert into subcategories (id, category_id, name, sort_order)
+    values ('50000000-0000-0000-0000-000000000009', '10000000-0000-0000-0000-000000000001', 'Roastery', 3);
+  insert into keywords (id, subcategory_id, label, sort_order)
+    values ('60000000-0000-0000-0000-000000000099', '50000000-0000-0000-0000-000000000009', 'Beans', 1);
+  update subcategories set name = 'Roastery & Bar' where id = '50000000-0000-0000-0000-000000000009';
+  update keywords set is_active = false where id = '60000000-0000-0000-0000-000000000099';
+  assert (select name from subcategories where id = '50000000-0000-0000-0000-000000000009') = 'Roastery & Bar', 'super renames';
+  assert not (select is_active from keywords where id = '60000000-0000-0000-0000-000000000099'), 'super archives';
+  begin insert into keywords (subcategory_id, label) values ('50000000-0000-0000-0000-000000000009', 'BEANS');
+    raise exception 'FAIL duplicate keyword label'; exception when unique_violation then null; end;
+  begin delete from keywords where id = '60000000-0000-0000-0000-000000000099'; raise exception 'FAIL super delete keyword';
+  exception when insufficient_privilege then null; end;
+  begin delete from subcategories where id = '50000000-0000-0000-0000-000000000009'; raise exception 'FAIL super delete subcategory';
+  exception when insufficient_privilege then null; end;
 end $$;
 reset role;
 
@@ -256,6 +352,8 @@ reset role;
 select pg_temp.as_user('00000000-0000-0000-0000-00000000dead', 'authenticated');
 do $$ begin
   assert (select count(*) from categories) = 0;
+  assert (select count(*) from subcategories) = 0;
+  assert (select count(*) from keywords) = 0;
   assert (select count(*) from feedback_submissions) = 0;
 end $$;
 reset role;

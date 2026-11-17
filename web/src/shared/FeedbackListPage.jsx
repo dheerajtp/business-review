@@ -18,7 +18,7 @@ export default function FeedbackListPage() {
   const isSuper = useAuth().profile?.role === 'super_admin';
   const meta = useAsync(async () => {
     const [companies, branches, stats] = await Promise.all([
-      must(supabase.from('companies').select('id,name,category_id,is_active').order('name')) ,
+      must(supabase.from('companies').select('id,name,subcategory_id,is_active').order('name')) ,
       must(supabase.from('branches').select('id,company_id,name,slug,google_place_id,is_active').order('name')) ,
       must(supabase.from('branch_stats').select('*')) ,
     ]);
@@ -49,7 +49,7 @@ export default function FeedbackListPage() {
 
   const fetchPage = useCallback(async (offset) => {
     let q = supabase.from('feedback_submissions')
-      .select('id,branch_id,company_id,rating,answers,comment,contact,clicked_google,created_at')
+      .select('id,branch_id,company_id,rating,keywords,comment,contact,clicked_google,created_at')
       .order('created_at', { ascending: false }).range(offset, offset + PAGE - 1);
     if (branchId) q = q.eq('branch_id', branchId); else if (companyId) q = q.eq('company_id', companyId);
     if (rating === 'below4') q = q.lt('rating', 4);

@@ -18,14 +18,9 @@ export default function SubmissionCard({ s, branchName, companyName, isNew }) {
         </div>
         {s.comment && <p style={{ marginTop: 8, whiteSpace: 'pre-wrap' }}>{s.comment}</p>}
         {s.contact && <p className="small" style={{ marginTop: 8 }}><strong>Contact:</strong> {s.contact}</p>}
-        {s.answers.length > 0 && (
-          <ul className="answers">
-            {s.answers.map((a) => (
-              <li key={a.question_id}>
-                <span className="q">{a.text}</span>{' '}
-                <strong>{Array.isArray(a.value) ? a.value.join(', ') : String(a.value)}</strong>
-              </li>
-            ))}
+        {s.keywords?.length > 0 && (
+          <ul className="kw-list">
+            {s.keywords.map((k) => <li key={k.id} className="pill">{k.label}</li>)}
           </ul>
         )}
       </div>

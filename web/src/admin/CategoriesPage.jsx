@@ -1,5 +1,7 @@
 import { useState } from 'react';
 import CategoryForm from './CategoryForm';
+import SubcategoryForm from './SubcategoryForm';
+import KeywordForm from './KeywordForm';
 import ConfirmDialog from '../ui/ConfirmDialog';
 import EmptyState from '../ui/EmptyState';
 import ErrorState from '../ui/ErrorState';
@@ -8,46 +10,115 @@ import PageHead from '../ui/PageHead';
 import { must, supabase } from '../lib/db';
 import { useAsync } from '../lib/useAsync';
 
-export default function CategoriesPage() {
-  const { data, error, loading, reload } = useAsync(
-    () => must(supabase.from('categories').select('id,name,description,is_active').order('name')) , []);
-  const [editing, setEditing] = useState(null);
-  const [toggling, setToggling] = useState(null);
+const nextOrder = (rows) => (rows?.length ? Math.max(...rows.map((r) => r.sort_order ?? 0)) + 1 : 1);
+// Active first, then by sort_order, then by name.
+const ordered = (rows, key) => [...(rows ?? [])].sort((a, b) =>
+  Number(b.is_active) - Number(a.is_active) || a.sort_order - b.sort_order || a[key].localeCompare(b[key]));
 
+/** One level of the taxonomy: a titled list with New/Edit/Archive/Restore and optional row selection. */
+function Level({ title, hint, rows, labelKey, selectedId, onSelect, onNew, onEdit, onToggle, state, emptyTitle, emptyHint, newLabel }) {
   return (
-    <>
-      <PageHead title="Categories" subtitle="Business types. Each has its own question set.">
-        <button type="button" className="btn primary" onClick={() => setEditing('new')}>New category</button>
-      </PageHead>
-
-      {loading && <ListSkeleton />}
-      {error && <ErrorState message={error} onRetry={reload} />}
-      {data && data.length === 0 && <EmptyState title="No categories yet" hint="Create one for each type of business, such as Café or Boutique." />}
+    <section className="tax-col" aria-label={title}>
+      <header className="tax-head">
+        <div>
+          <h2>{title}</h2>
+          {hint && <p className="muted small">{hint}</p>}
+        </div>
+        <button type="button" className="btn sm primary" onClick={onNew}>{newLabel}</button>
+      </header>
+      {state.loading && !rows && <ListSkeleton />}
+      {state.error && <ErrorState message={state.error} onRetry={state.reload} />}
+      {rows && rows.length === 0 && <EmptyState title={emptyTitle} hint={emptyHint} />}
       <div className="list">
-        {data?.map((c) => (
-          <div key={c.id} className={`item${c.is_active ? '' : ' dim'}`}>
-            <div>
-              <div className="title">{c.name} {!c.is_active && <span className="pill off">Archived</span>}</div>
-              {c.description && <div className="muted small">{c.description}</div>}
-            </div>
+        {ordered(rows, labelKey).map((r) => (
+          <div key={r.id} className={`item${r.is_active ? '' : ' dim'}${r.id === selectedId ? ' tax-selected' : ''}`}>
+            {onSelect ? (
+              <button type="button" className="tax-pick" aria-pressed={r.id === selectedId} onClick={() => onSelect(r.id)}>
+                <span className="title">{r[labelKey]} {!r.is_active && <span className="pill off">Archived</span>}</span>
+                {r.description && <span className="muted small">{r.description}</span>}
+              </button>
+            ) : (
+              <div className="title">{r[labelKey]} {!r.is_active && <span className="pill off">Archived</span>}</div>
+            )}
             <div className="actions">
-              <button type="button" className="btn sm" onClick={() => setEditing(c)}>Edit</button>
-              <button type="button" className="btn sm" onClick={() => setToggling(c)}>{c.is_active ? 'Archive' : 'Restore'}</button>
+              <button type="button" className="btn sm" onClick={() => onEdit(r)}>Edit</button>
+              <button type="button" className="btn sm" onClick={() => onToggle(r)}>{r.is_active ? 'Archive' : 'Restore'}</button>
             </div>
           </div>
         ))}
       </div>
+    </section>
+  );
+}
 
-      {editing && <CategoryForm category={editing === 'new' ? null : editing} onSaved={reload} onClose={() => setEditing(null)} />}
+export default function CategoriesPage() {
+  const [catId, setCatId] = useState(null);
+  const [subId, setSubId] = useState(null);
+  const cats = useAsync(() => must(supabase.from('categories').select('id,name,description,is_active,sort_order')), []);
+  const subs = useAsync(() => (catId
+    ? must(supabase.from('subcategories').select('id,name,is_active,sort_order').eq('category_id', catId))
+    : Promise.resolve([])), [catId]);
+  const kws = useAsync(() => (subId
+    ? must(supabase.from('keywords').select('id,label,is_active,sort_order').eq('subcategory_id', subId))
+    : Promise.resolve([])), [subId]);
+  // editing: { kind: 'category'|'subcategory'|'keyword', row: object|null }
+  const [editing, setEditing] = useState(null);
+  const [toggling, setToggling] = useState(null);
+
+  const cat = cats.data?.find((c) => c.id === catId);
+  const sub = subs.data?.find((s) => s.id === subId);
+  const TABLES = { category: 'categories', subcategory: 'subcategories', keyword: 'keywords' };
+  const RELOAD = { category: cats.reload, subcategory: subs.reload, keyword: kws.reload };
+  const name = (t) => t.row.name ?? t.row.label;
+  const WARN = {
+    category: 'It is hidden from company pickers until restored. Existing feedback and companies are kept.',
+    subcategory: 'It is hidden from company pickers until restored. Existing feedback and companies are kept.',
+    keyword: 'Customers will no longer see this keyword. Existing feedback is kept.',
+  };
+
+  return (
+    <>
+      <PageHead title="Categories" subtitle="Category, then subcategory, then the keywords customers can pick." />
+      <div className="tax-grid">
+        <Level
+          title="Categories" rows={cats.data} labelKey="name" state={cats}
+          selectedId={catId} onSelect={(id) => { setCatId(id); setSubId(null); }}
+          newLabel="New category" onNew={() => setEditing({ kind: 'category', row: null })}
+          onEdit={(row) => setEditing({ kind: 'category', row })} onToggle={(row) => setToggling({ kind: 'category', row })}
+          emptyTitle="No categories yet" emptyHint="Create one for each broad type of business, such as Food & drink."
+        />
+        {cat ? (
+          <Level
+            title={`Subcategories of ${cat.name}`} rows={subs.loading ? null : subs.data} labelKey="name" state={subs}
+            selectedId={subId} onSelect={setSubId}
+            newLabel="New subcategory" onNew={() => setEditing({ kind: 'subcategory', row: null })}
+            onEdit={(row) => setEditing({ kind: 'subcategory', row })} onToggle={(row) => setToggling({ kind: 'subcategory', row })}
+            emptyTitle="No subcategories yet" emptyHint="Companies pick a subcategory, such as Coffee shop."
+          />
+        ) : <p className="muted tax-hint">Select a category to see its subcategories.</p>}
+        {cat && sub ? (
+          <Level
+            title={`Keywords for ${sub.name}`} rows={kws.loading ? null : kws.data} labelKey="label" state={kws}
+            newLabel="New keyword" onNew={() => setEditing({ kind: 'keyword', row: null })}
+            onEdit={(row) => setEditing({ kind: 'keyword', row })} onToggle={(row) => setToggling({ kind: 'keyword', row })}
+            emptyTitle="No keywords yet" emptyHint="Short tags customers can tap, such as Friendly staff."
+          />
+        ) : cat && <p className="muted tax-hint">Select a subcategory to see its keywords.</p>}
+      </div>
+
+      {editing?.kind === 'category' && <CategoryForm category={editing.row} nextOrder={nextOrder(cats.data)} onSaved={cats.reload} onClose={() => setEditing(null)} />}
+      {editing?.kind === 'subcategory' && <SubcategoryForm categoryId={catId} subcategory={editing.row} nextOrder={nextOrder(subs.data)} onSaved={subs.reload} onClose={() => setEditing(null)} />}
+      {editing?.kind === 'keyword' && <KeywordForm subcategoryId={subId} keyword={editing.row} nextOrder={nextOrder(kws.data)} onSaved={kws.reload} onClose={() => setEditing(null)} />}
       {toggling && (
         <ConfirmDialog
-          title={toggling.is_active ? `Archive ${toggling.name}?` : `Restore ${toggling.name}?`}
-          message={toggling.is_active
-            ? 'Feedback links for every company in this category stop working until it is restored. Existing feedback is kept.'
-            : 'Feedback links for companies in this category will work again.'}
-          confirmLabel={toggling.is_active ? 'Archive' : 'Restore'}
+          title={toggling.row.is_active ? `Archive ${name(toggling)}?` : `Restore ${name(toggling)}?`}
+          message={toggling.row.is_active ? WARN[toggling.kind] : 'It will be available again.'}
+          confirmLabel={toggling.row.is_active ? 'Archive' : 'Restore'}
           onClose={() => setToggling(null)}
-          onConfirm={async () => { await must(supabase.from('categories').update({ is_active: !toggling.is_active }).eq('id', toggling.id).select()); reload(); }}
+          onConfirm={async () => {
+            await must(supabase.from(TABLES[toggling.kind]).update({ is_active: !toggling.row.is_active }).eq('id', toggling.row.id).select());
+            RELOAD[toggling.kind]();
+          }}
         />
       )}
     </>

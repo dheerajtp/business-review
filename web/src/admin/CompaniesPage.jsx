@@ -11,15 +11,16 @@ import { useAsync } from '../lib/useAsync';
 
 export default function CompaniesPage() {
   const { data, error, loading, reload } = useAsync(async () => {
-    const [companies, categories] = await Promise.all([
-      must(supabase.from('companies').select('id,name,category_id,is_active').order('name')) ,
-      must(supabase.from('categories').select('id,name,description,is_active').order('name')) ,
+    const [companies, categories, subcategories] = await Promise.all([
+      must(supabase.from('companies').select('id,name,subcategory_id,is_active,subcategories(name,category_id,categories(name))').order('name')),
+      must(supabase.from('categories').select('id,name,is_active').order('name')),
+      must(supabase.from('subcategories').select('id,name,category_id,is_active').order('name')),
     ]);
-    return { companies, categories };
+    return { companies, categories, subcategories };
   }, []);
   const [editing, setEditing] = useState(null);
   const [toggling, setToggling] = useState(null);
-  const catName = (id) => data?.categories.find((c) => c.id === id)?.name ?? '—';
+  const where = (c) => (c.subcategories ? `${c.subcategories.categories?.name ?? '—'} › ${c.subcategories.name}` : '—');
 
   return (
     <>
@@ -29,14 +30,14 @@ export default function CompaniesPage() {
 
       {loading && <ListSkeleton />}
       {error && <ErrorState message={error} onRetry={reload} />}
-      {data && !data.categories.length && <EmptyState title="Create a category first" hint="Every company belongs to one category." />}
+      {data && !data.categories.length && <EmptyState title="Create a category first" hint="Every company belongs to a category and subcategory." />}
       {data && data.categories.length > 0 && data.companies.length === 0 && <EmptyState title="No companies yet" />}
       <div className="list">
         {data?.companies.map((c) => (
           <div key={c.id} className={`item${c.is_active ? '' : ' dim'}`}>
             <div>
               <div className="title">{c.name} {!c.is_active && <span className="pill off">Archived</span>}</div>
-              <div className="muted small">{catName(c.category_id)}</div>
+              <div className="muted small">{where(c)}</div>
             </div>
             <div className="actions">
               <Link className="btn sm primary" to={`/admin/companies/${c.id}`}>Branches &amp; logins</Link>
@@ -47,7 +48,7 @@ export default function CompaniesPage() {
         ))}
       </div>
 
-      {editing && data && <CompanyForm company={editing === 'new' ? null : editing} categories={data.categories} onSaved={reload} onClose={() => setEditing(null)} />}
+      {editing && data && <CompanyForm company={editing === 'new' ? null : editing} categories={data.categories} subcategories={data.subcategories} onSaved={reload} onClose={() => setEditing(null)} />}
       {toggling && (
         <ConfirmDialog
           title={toggling.is_active ? `Archive ${toggling.name}?` : `Restore ${toggling.name}?`}

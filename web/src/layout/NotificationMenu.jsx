@@ -11,9 +11,9 @@ export default function NotificationMenu() {
   const box = useRef(null);
   const { pathname } = useLocation();
   const isSuper = useAuth().profile?.role === 'super_admin';
-  const { newCount, newLow, items, pendingRequests, markSeen } = useNewFeedback();
+  const { newCount, newLow, items, markSeen } = useNewFeedback();
   const feedbackPath = isSuper ? '/admin/feedback' : '/business';
-  const total = newCount + pendingRequests;
+  const total = newCount;
   useDismiss(box, open, () => setOpen(false));
 
   return (
@@ -28,12 +28,7 @@ export default function NotificationMenu() {
             <h2>Notifications</h2>
             {newCount > 0 && <button type="button" className="link-btn" onClick={() => void markSeen()}>Mark all as read</button>}
           </header>
-          {isSuper && pendingRequests > 0 && (
-            <Link className="notif-req" to="/admin/requests" onClick={() => setOpen(false)}>
-              {pendingRequests} question {pendingRequests === 1 ? 'request is' : 'requests are'} waiting for review
-            </Link>
-          )}
-          {items.length === 0 && !(isSuper && pendingRequests > 0) && <p className="pop-empty">You're all caught up.</p>}
+          {items.length === 0 && <p className="pop-empty">You're all caught up.</p>}
           {items.length > 0 && (
             <ul className="notif-list">
               {items.map((it) => <NotificationRow key={it.id} item={it} to={feedbackPath} onClick={() => setOpen(false)} />)}

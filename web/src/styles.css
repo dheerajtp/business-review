@@ -197,8 +197,6 @@ button, input, select, textarea { font: inherit; color: inherit; }
 .stat .n { font-size: 1.75rem; font-weight: 700; letter-spacing: -0.02em; }
 .stat .l { color: var(--ink-3); font-size: 0.8125rem; }
 
-.answers { margin: var(--s3) 0 0; padding: 0; list-style: none; display: grid; gap: var(--s1); font-size: 0.9375rem; }
-.answers .q { color: var(--ink-3); }
 .stars-inline { color: var(--star); letter-spacing: 1px; font-size: 1.05rem; }
 .stars-inline .off { color: var(--star-off); }
 
@@ -602,3 +600,21 @@ button.rank-row:hover { background: var(--bg); }
 .step-title { font-weight: 600; line-height: 28px; }
 .stepper li.done .step-title { color: var(--ink-3); font-weight: 500; }
 .stepper li .small { margin-top: -2px; }
+
+/* Keyword chips (customer form + feedback cards) */
+.kw-group { display: flex; flex-wrap: wrap; gap: var(--s2); }
+.kw-chip { min-height: 44px; padding: 0 var(--s4); border: 1px solid var(--line); border-radius: 999px; background: var(--bg); color: var(--ink-2); font: inherit; cursor: pointer; }
+.kw-chip[aria-pressed="true"] { border-color: var(--accent); background: var(--accent-soft); font-weight: 600; }
+.kw-chip:disabled { opacity: 0.5; cursor: not-allowed; }
+.kw-chip:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+.kw-list { margin: var(--s3) 0 0; padding: 0; list-style: none; display: flex; flex-wrap: wrap; gap: var(--s2); }
+
+/* tax- : admin taxonomy screen (categories > subcategories > keywords) */
+.tax-grid { display: grid; gap: var(--s5, 24px); grid-template-columns: 1fr; align-items: start; }
+@media (min-width: 1000px) { .tax-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
+.tax-head { display: flex; justify-content: space-between; align-items: flex-start; gap: var(--s3); margin-bottom: var(--s3); }
+.tax-head h2 { font-size: 1.0625rem; overflow-wrap: anywhere; }
+.tax-pick { all: unset; cursor: pointer; display: grid; gap: 2px; flex: 1; min-width: 0; }
+.tax-pick:focus-visible { outline: 2px solid var(--accent); outline-offset: 4px; border-radius: var(--r-md); }
+.item.tax-selected { box-shadow: inset 4px 0 0 var(--accent), var(--shadow-sm); }
+.tax-hint { padding: var(--s4); }

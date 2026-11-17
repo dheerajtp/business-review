@@ -16,7 +16,7 @@ export default function CompanyDetailPage() {
   const { id = '' } = useParams();
   const { data, error, loading, reload } = useAsync(async () => {
     const [company, branches, logins] = await Promise.all([
-      must(supabase.from('companies').select('id,name,category_id,is_active').eq('id', id).single()) ,
+      must(supabase.from('companies').select('id,name,subcategory_id,is_active,subcategories(name,categories(name))').eq('id', id).single()) ,
       must(supabase.from('branches').select('id,company_id,name,slug,google_place_id,is_active').eq('company_id', id).order('name')),
       // The logins list must not take the whole page down if it fails (e.g. a migration not applied yet).
       must(supabase.rpc('list_business_admins', { p_company_id: id })).then((rows) => ({ rows }), (e) => ({ error: e.message })),
@@ -35,7 +35,7 @@ export default function CompanyDetailPage() {
   return (
     <>
       <p className="small" style={{ marginBottom: 8 }}><Link to="/admin/companies">← Companies</Link></p>
-      <PageHead title={company.name} subtitle="Branches each get their own NFC tag, QR code and Google listing.">
+      <PageHead title={company.name} subtitle={`${company.subcategories ? `${company.subcategories.categories?.name ?? '—'} › ${company.subcategories.name} · ` : ''}Branches each get their own NFC tag, QR code and Google listing.`}>
         <div className="row">
           <button type="button" className="btn" onClick={() => setLogin(true)}>Add business login</button>
           <button type="button" className="btn primary" onClick={() => setEditing('new')}>New branch</button>

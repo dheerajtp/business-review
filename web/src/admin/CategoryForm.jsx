@@ -2,9 +2,9 @@ import { useState } from 'react';
 import Modal from '../ui/Modal';
 import Field from '../ui/Field';
 import { must, supabase } from '../lib/db';
-import { errorMessage } from '../lib/format';
+import { taxonomyError } from './saveError';
 
-export default function CategoryForm({ category, onSaved, onClose }) {
+export default function CategoryForm({ category, nextOrder, onSaved, onClose }) {
   const [name, setName] = useState(category?.name ?? '');
   const [description, setDescription] = useState(category?.description ?? '');
   const [error, setError] = useState(null);
@@ -18,16 +18,16 @@ export default function CategoryForm({ category, onSaved, onClose }) {
     try {
       await must(category
         ? supabase.from('categories').update(row).eq('id', category.id).select()
-        : supabase.from('categories').insert(row).select());
+        : supabase.from('categories').insert({ ...row, sort_order: nextOrder }).select());
       onSaved();
       onClose();
-    } catch (err) { setError(errorMessage(err)); setBusy(false); }
+    } catch (err) { setError(taxonomyError(err)); setBusy(false); }
   }
 
   return (
     <Modal title={category ? 'Edit category' : 'New category'} onClose={onClose}>
       <form className="stack" onSubmit={save}>
-        <Field label="Name"><input className="input" required maxLength={80} placeholder="e.g. Café, Boutique, Clinic" value={name} onChange={(e) => setName(e.target.value)} /></Field>
+        <Field label="Name"><input className="input" required maxLength={80} placeholder="e.g. Food & drink, Retail, Health" value={name} onChange={(e) => setName(e.target.value)} /></Field>
         <Field label="Description" hint="Internal note, not shown to customers."><textarea className="textarea" maxLength={500} value={description} onChange={(e) => setDescription(e.target.value)} /></Field>
         {error && <p className="alert" role="alert">{error}</p>}
         <div className="actions">

@@ -1,17 +1,31 @@
 import { useState } from 'react';
-import QuestionField from './QuestionField';
 import StarRating from './StarRating';
-import { isAnswered } from '../lib/types';
+import { composeReview } from './reviewText';
+import { MAX_KEYWORDS } from '../lib/types';
 
 export default function FeedbackFormView({ form, draft, onDraft, onSubmit, submitting, error, preview }) {
-  const [tried, setTried] = useState(false);
-  const missing = form.questions.filter((q) => q.is_required && !isAnswered(draft.answers[q.id]));
+  const [edited, setEdited] = useState(false);
+  const keywords = form.keywords ?? [];
+
+  // Re-compose the draft review until the customer types in the box; manual edits are never overwritten.
+  function withReview(next) {
+    if (edited || !next.rating) return next;
+    const labels = next.keywordIds.map((id) => keywords.find((k) => k.id === id)?.label).filter(Boolean);
+    return { ...next, comment: composeReview({ company: form.company_name, rating: next.rating, labels }) };
+  }
+
+  function toggle(id) {
+    const on = draft.keywordIds.includes(id);
+    const keywordIds = on ? draft.keywordIds.filter((x) => x !== id) : [...draft.keywordIds, id];
+    onDraft(withReview({ ...draft, keywordIds }));
+  }
 
   function submit(e) {
     e.preventDefault();
-    setTried(true);
-    if (draft.rating && !missing.length) onSubmit?.();
+    if (draft.rating) onSubmit?.();
   }
+
+  const full = draft.keywordIds.length >= MAX_KEYWORDS;
 
   return (
     <form onSubmit={submit} noValidate className={preview ? undefined : 'cust'}>
@@ -21,23 +35,29 @@ export default function FeedbackFormView({ form, draft, onDraft, onSubmit, submi
       </header>
 
       <div className="stack">
-        <StarRating name={preview ? 'preview-rating' : 'rating'} value={draft.rating} onChange={(rating) => onDraft({ ...draft, rating })} />
+        <StarRating name={preview ? 'preview-rating' : 'rating'} value={draft.rating} onChange={(rating) => onDraft(withReview({ ...draft, rating }))} />
 
         {draft.rating > 0 && (
           <div className="stack reveal">
-            {form.questions.map((q) => (
-              <QuestionField
-                key={q.id}
-                q={q}
-                value={draft.answers[q.id]}
-                invalid={tried && missing.includes(q)}
-                onChange={(v) => onDraft({ ...draft, answers: { ...draft.answers, [q.id]: v } })}
-              />
-            ))}
+            {keywords.length > 0 && (
+              <fieldset className="qblock">
+                <legend>What stood out? <span className="muted small">(optional · up to {MAX_KEYWORDS})</span></legend>
+                <div className="kw-group">
+                  {keywords.map((k) => {
+                    const on = draft.keywordIds.includes(k.id);
+                    return (
+                      <button key={k.id} type="button" className="kw-chip" aria-pressed={on} disabled={!on && full} onClick={() => toggle(k.id)}>
+                        {k.label}
+                      </button>
+                    );
+                  })}
+                </div>
+              </fieldset>
+            )}
 
             <label className="field qblock">
               <span className="label">Anything else you'd like to tell us? <span className="muted small">(optional)</span></span>
-              <textarea className="textarea" maxLength={2000} value={draft.comment} onChange={(e) => onDraft({ ...draft, comment: e.target.value })} />
+              <textarea className="textarea" maxLength={2000} value={draft.comment} onChange={(e) => { setEdited(true); onDraft({ ...draft, comment: e.target.value }); }} />
             </label>
 
             {draft.rating < 4 && (
@@ -50,7 +70,6 @@ export default function FeedbackFormView({ form, draft, onDraft, onSubmit, submi
         )}
 
         {error && <p className="alert" role="alert">{error}</p>}
-        {tried && missing.length > 0 && <p className="alert" role="alert">Please answer the required questions above.</p>}
       </div>
 
       <div className={preview ? undefined : 'submit-bar'} style={preview ? { marginTop: 16 } : undefined}>
