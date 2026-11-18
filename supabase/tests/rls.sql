@@ -20,6 +20,7 @@ do $$ begin
   assert not exists (select 1 from keywords where label <> lower(label) or char_length(label) > 60),
     'seed labels are lower case and <= 60 chars';
   assert not exists (select 1 from branch_keywords), 'no branch picks after migration';
+  assert not exists (select 1 from company_keywords), 'no company picks after migration';
 end $$;
 create temp table _seed_counts as
   select (select count(*) from categories) c, (select count(*) from subcategories) s, (select count(*) from keywords) k;
@@ -514,6 +515,210 @@ do $$ begin
 end $$;
 reset role;
 
+-- Company keyword fixtures are added only here so the company/branch/feedback counts asserted
+-- above stay as they were. Leaf Co: leaf1 has no branch picks (inherits), leaf2 gets its own.
+insert into companies (id, name, subcategory_id) values
+  ('20000000-0000-0000-0000-000000000003', 'Leaf Co', '50000000-0000-0000-0000-000000000003');
+insert into branches (id, company_id, name, slug, google_place_id) values
+  ('30000000-0000-0000-0000-000000000003', '20000000-0000-0000-0000-000000000003', 'Leaf Main', 'leaf1', 'PLACE_LEAF1'),
+  ('30000000-0000-0000-0000-000000000004', '20000000-0000-0000-0000-000000000003', 'Leaf Annex', 'leaf2', 'PLACE_LEAF2');
+
+\echo '--- set_company_keywords: super admin, replace, ordering, duplicates, cap, unknown/archived'
+select pg_temp.as_user('00000000-0000-0000-0000-0000000000a1', 'authenticated');
+do $$ begin
+  -- duplicates merged at their first position; positions 1..n
+  perform set_company_keywords('20000000-0000-0000-0000-000000000003',
+    array['60000000-0000-0000-0000-000000000003', '60000000-0000-0000-0000-000000000001',
+          '60000000-0000-0000-0000-000000000003', '60000000-0000-0000-0000-000000000009']::uuid[]);
+  assert (select array_agg(keyword_id order by position) from company_keywords
+          where company_id = '20000000-0000-0000-0000-000000000003')
+         = array['60000000-0000-0000-0000-000000000003', '60000000-0000-0000-0000-000000000001',
+                 '60000000-0000-0000-0000-000000000009']::uuid[], 'first set, deduped, in picked order';
+  -- replaces the previous picks
+  perform set_company_keywords('20000000-0000-0000-0000-000000000003',
+    array['60000000-0000-0000-0000-000000000006', '60000000-0000-0000-0000-000000000001',
+          '60000000-0000-0000-0000-000000000007']::uuid[]);
+  assert (select array_agg(keyword_id order by position) from company_keywords
+          where company_id = '20000000-0000-0000-0000-000000000003')
+         = array['60000000-0000-0000-0000-000000000006', '60000000-0000-0000-0000-000000000001',
+                 '60000000-0000-0000-0000-000000000007']::uuid[], 'replaced, in picked order';
+  assert (select array_agg(position order by position) from company_keywords
+          where company_id = '20000000-0000-0000-0000-000000000003') = array[1, 2, 3], 'positions 1..n';
+  -- null = empty
+  perform set_company_keywords('20000000-0000-0000-0000-000000000002',
+    array['60000000-0000-0000-0000-000000000005']::uuid[]);
+  perform set_company_keywords('20000000-0000-0000-0000-000000000002', null);
+  assert not exists (select 1 from company_keywords where company_id = '20000000-0000-0000-0000-000000000002'), 'null clears';
+
+  begin perform set_company_keywords('20000000-0000-0000-0000-000000000003', array[
+      '60000000-0000-0000-0000-000000000001', '60000000-0000-0000-0000-000000000002', '60000000-0000-0000-0000-000000000003',
+      '60000000-0000-0000-0000-000000000005', '60000000-0000-0000-0000-000000000006', '60000000-0000-0000-0000-000000000007',
+      '60000000-0000-0000-0000-000000000008', '60000000-0000-0000-0000-000000000009', '60000000-0000-0000-0000-00000000000a',
+      '60000000-0000-0000-0000-00000000000b', '60000000-0000-0000-0000-00000000000c']::uuid[]);
+    raise exception 'FAIL company 11 keywords'; exception when sqlstate '22023' then
+      assert sqlerrm = 'too many keywords', 'too many message, got ' || sqlerrm; end;
+  begin perform set_company_keywords('20000000-0000-0000-0000-000000000003',
+    array['60000000-0000-0000-0000-000000000001', '60000000-0000-0000-0000-000000000004']::uuid[]);
+    raise exception 'FAIL company archived keyword'; exception when sqlstate '22023' then
+      assert sqlerrm = 'unknown keyword', 'unknown message, got ' || sqlerrm; end;
+  begin perform set_company_keywords('20000000-0000-0000-0000-000000000003', array[gen_random_uuid()]);
+    raise exception 'FAIL company random keyword id'; exception when sqlstate '22023' then null; end;
+  begin perform set_company_keywords('20000000-0000-0000-0000-000000000003', array[null]::uuid[]);
+    raise exception 'FAIL company null keyword id'; exception when sqlstate '22023' then null; end;
+  begin perform set_company_keywords(gen_random_uuid(), '{}'::uuid[]);
+    raise exception 'FAIL unknown company'; exception when sqlstate 'P0002' then
+      assert sqlerrm = 'unknown company', 'unknown company message, got ' || sqlerrm; end;
+  assert (select count(*) from company_keywords where company_id = '20000000-0000-0000-0000-000000000003') = 3,
+    'rejected calls leave the company picks unchanged';
+
+  -- no direct writes, even for super admin
+  begin insert into company_keywords values ('20000000-0000-0000-0000-000000000003', '60000000-0000-0000-0000-000000000008', 9);
+    raise exception 'FAIL super insert company_keywords'; exception when insufficient_privilege then null; end;
+  begin update company_keywords set position = 9; raise exception 'FAIL super update company_keywords';
+  exception when insufficient_privilege then null; end;
+  begin delete from company_keywords; raise exception 'FAIL super delete company_keywords';
+  exception when insufficient_privilege then null; end;
+
+  -- leaf2 gets its own pick (override)
+  perform set_branch_keywords('30000000-0000-0000-0000-000000000004',
+    array['60000000-0000-0000-0000-000000000008']::uuid[]);
+end $$;
+reset role;
+
+\echo '--- set_company_keywords: business admin own company only; no direct writes'
+select pg_temp.as_user('00000000-0000-0000-0000-0000000000b1', 'authenticated');
+do $$ begin
+  perform set_company_keywords('20000000-0000-0000-0000-000000000001',
+    array['60000000-0000-0000-0000-000000000002', '60000000-0000-0000-0000-000000000009']::uuid[]);
+  assert (select count(*) from company_keywords) = 2, 'BA1 sees only own company picks';
+  assert not exists (select 1 from company_keywords where company_id <> '20000000-0000-0000-0000-000000000001'),
+    'BA1 own company rows only';
+  begin perform set_company_keywords('20000000-0000-0000-0000-000000000003',
+    array['60000000-0000-0000-0000-000000000001']::uuid[]);
+    raise exception 'FAIL BA other company keywords'; exception when sqlstate '42501' then
+      assert sqlerrm = 'forbidden', 'forbidden message, got ' || sqlerrm; end;
+  begin perform set_company_keywords('20000000-0000-0000-0000-000000000002', '{}'::uuid[]);
+    raise exception 'FAIL BA clears other company keywords'; exception when sqlstate '42501' then null; end;
+  begin insert into company_keywords values ('20000000-0000-0000-0000-000000000001', '60000000-0000-0000-0000-000000000008', 9);
+    raise exception 'FAIL BA insert company_keywords'; exception when insufficient_privilege then null; end;
+  begin update company_keywords set position = 9; raise exception 'FAIL BA update company_keywords';
+  exception when insufficient_privilege then null; end;
+  begin delete from company_keywords; raise exception 'FAIL BA delete company_keywords';
+  exception when insufficient_privilege then null; end;
+  begin perform * from effective_keyword_ids('30000000-0000-0000-0000-000000000001');
+    raise exception 'FAIL authenticated effective_keyword_ids'; exception when insufficient_privilege then null; end;
+end $$;
+reset role;
+select pg_temp.as_user('00000000-0000-0000-0000-0000000000b2', 'authenticated');
+do $$ begin
+  assert (select count(*) from company_keywords) = 0, 'BA2 sees no other company picks';
+  begin perform set_company_keywords('20000000-0000-0000-0000-000000000001', '{}'::uuid[]);
+    raise exception 'FAIL BA2 clears other company keywords'; exception when sqlstate '42501' then null; end;
+end $$;
+reset role;
+select pg_temp.as_user('00000000-0000-0000-0000-0000000000a1', 'authenticated');
+do $$ begin
+  assert (select count(*) from company_keywords) = 5, 'super sees all company picks; forbidden calls changed nothing';
+end $$;
+reset role;
+
+\echo '--- anon cannot read or write company_keywords or call the keyword RPCs'
+set role anon;
+do $$ begin
+  begin perform 1 from company_keywords; raise exception 'FAIL anon read company_keywords';
+  exception when insufficient_privilege then null; end;
+  begin insert into company_keywords values ('20000000-0000-0000-0000-000000000001', '60000000-0000-0000-0000-000000000008', 9);
+    raise exception 'FAIL anon insert company_keywords';
+  exception when insufficient_privilege then null; end;
+  begin update company_keywords set position = 9; raise exception 'FAIL anon update company_keywords';
+  exception when insufficient_privilege then null; end;
+  begin delete from company_keywords; raise exception 'FAIL anon delete company_keywords';
+  exception when insufficient_privilege then null; end;
+  begin perform set_company_keywords('20000000-0000-0000-0000-000000000001', '{}'::uuid[]);
+    raise exception 'FAIL anon set_company_keywords';
+  exception when insufficient_privilege then null; end;
+  begin perform * from effective_keyword_ids('30000000-0000-0000-0000-000000000001');
+    raise exception 'FAIL anon effective_keyword_ids';
+  exception when insufficient_privilege then null; end;
+end $$;
+reset role;
+
+\echo '--- effective keywords: branch override wins, zero branch rows inherit; submit uses the effective set'
+set role anon;
+do $$
+declare id uuid;
+begin
+  assert (select array_agg(e->>'label' order by n) from jsonb_array_elements(get_feedback_form('leaf1')->'keywords') with ordinality t(e, n))
+         = array['Tea','Coffee','Seating'], 'leaf1 (no branch picks) inherits the company list in company order';
+  assert get_feedback_form('leaf1')->'keywords'->0 = '{"id": "60000000-0000-0000-0000-000000000006", "label": "Tea"}'::jsonb,
+    'inherited keyword is {id,label}';
+  assert get_feedback_form('leaf2')->'keywords' = '[{"id": "60000000-0000-0000-0000-000000000008", "label": "Music"}]'::jsonb,
+    'leaf2 branch picks override the company list';
+  assert (select array_agg(e->>'label' order by n) from jsonb_array_elements(get_feedback_form('brew1')->'keywords') with ordinality t(e, n))
+         = array['Ambience','Coffee','Staff','Seating'], 'brew1 picks override Brew Co company keywords';
+
+  id := submit_feedback('leaf1', 4,
+    array['60000000-0000-0000-0000-000000000006', '60000000-0000-0000-0000-000000000001']::uuid[], null, null);
+  assert id is not null, 'inherited keywords accepted';
+  begin perform submit_feedback('leaf1', 5, array['60000000-0000-0000-0000-000000000008']::uuid[], null, null);
+    raise exception 'FAIL leaf1 keyword picked only for leaf2'; exception when sqlstate '22023' then
+      assert sqlerrm = 'unknown keyword', 'unknown message, got ' || sqlerrm; end;
+  begin perform submit_feedback('leaf2', 5, array['60000000-0000-0000-0000-000000000006']::uuid[], null, null);
+    raise exception 'FAIL leaf2 company keyword while branch overrides'; exception when sqlstate '22023' then null; end;
+  begin perform submit_feedback('brew1', 5, array['60000000-0000-0000-0000-000000000009']::uuid[], null, null);
+    raise exception 'FAIL brew1 company keyword while branch overrides'; exception when sqlstate '22023' then null; end;
+end $$;
+reset role;
+do $$ begin
+  assert (select keywords from feedback_submissions where branch_id = '30000000-0000-0000-0000-000000000003') =
+    '[{"id": "60000000-0000-0000-0000-000000000006", "label": "Tea"},
+      {"id": "60000000-0000-0000-0000-000000000001", "label": "Coffee"}]'::jsonb, 'inherited snapshot in submitted order';
+  assert (select count(*) from feedback_submissions where company_id = '20000000-0000-0000-0000-000000000003') = 1,
+    'rejected submits stored nothing';
+end $$;
+
+-- clearing a branch's picks makes it inherit again
+select pg_temp.as_user('00000000-0000-0000-0000-0000000000a1', 'authenticated');
+do $$ begin
+  perform set_branch_keywords('30000000-0000-0000-0000-000000000004', '{}'::uuid[]);
+end $$;
+reset role;
+set role anon;
+do $$ begin
+  assert (select array_agg(e->>'label' order by n) from jsonb_array_elements(get_feedback_form('leaf2')->'keywords') with ordinality t(e, n))
+         = array['Tea','Coffee','Seating'], 'leaf2 with zero branch rows inherits the company list';
+  perform submit_feedback('leaf2', 5, array['60000000-0000-0000-0000-000000000006']::uuid[], null, null);
+  begin perform submit_feedback('leaf2', 5, array['60000000-0000-0000-0000-000000000008']::uuid[], null, null);
+    raise exception 'FAIL leaf2 old branch pick after clearing'; exception when sqlstate '22023' then null; end;
+end $$;
+reset role;
+
+\echo '--- effective keywords: archived company keyword hidden and rejected but kept; none at either level = []'
+update keywords set is_active = false where id = '60000000-0000-0000-0000-000000000007';
+set role anon;
+do $$ begin
+  assert (select array_agg(e->>'label' order by n) from jsonb_array_elements(get_feedback_form('leaf1')->'keywords') with ordinality t(e, n))
+         = array['Tea','Coffee'], 'archived company keyword hidden from form';
+  begin perform submit_feedback('leaf1', 5, array['60000000-0000-0000-0000-000000000007']::uuid[], null, null);
+    raise exception 'FAIL archived company keyword'; exception when sqlstate '22023' then null; end;
+end $$;
+reset role;
+do $$ begin
+  assert exists (select 1 from company_keywords where keyword_id = '60000000-0000-0000-0000-000000000007'),
+    'archiving keeps the company pick row';
+end $$;
+update keywords set is_active = true where id = '60000000-0000-0000-0000-000000000007';
+-- Silk House has no company keywords (cleared above); with its branch pick removed, silk1 has none at either level
+delete from branch_keywords where branch_id = '30000000-0000-0000-0000-000000000002';
+set role anon;
+do $$ begin
+  assert get_feedback_form('silk1')->'keywords' = '[]'::jsonb, 'no picks at either level = empty list';
+  begin perform submit_feedback('silk1', 5, array['60000000-0000-0000-0000-000000000005']::uuid[], null, null);
+    raise exception 'FAIL silk1 keyword with no picks at either level'; exception when sqlstate '22023' then null; end;
+end $$;
+reset role;
+insert into branch_keywords values ('30000000-0000-0000-0000-000000000002', '60000000-0000-0000-0000-000000000005', 1);
+
 \echo '--- user without profile sees nothing'
 select pg_temp.as_user('00000000-0000-0000-0000-00000000dead', 'authenticated');
 do $$ begin
@@ -521,9 +726,13 @@ do $$ begin
   assert (select count(*) from subcategories) = 0;
   assert (select count(*) from keywords) = 0;
   assert (select count(*) from branch_keywords) = 0;
+  assert (select count(*) from company_keywords) = 0;
   assert (select count(*) from feedback_submissions) = 0;
   begin perform set_branch_keywords('30000000-0000-0000-0000-000000000001', '{}'::uuid[]);
     raise exception 'FAIL no-profile set_branch_keywords'; exception when sqlstate '42501' then
+      assert sqlerrm = 'forbidden', 'forbidden message, got ' || sqlerrm; end;
+  begin perform set_company_keywords('20000000-0000-0000-0000-000000000001', '{}'::uuid[]);
+    raise exception 'FAIL no-profile set_company_keywords'; exception when sqlstate '42501' then
       assert sqlerrm = 'forbidden', 'forbidden message, got ' || sqlerrm; end;
 end $$;
 reset role;

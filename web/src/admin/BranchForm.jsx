@@ -38,7 +38,8 @@ export default function BranchForm({ companyId, categoryId = null, branch, onSav
           <button className="btn primary" disabled={busy}>{busy ? 'Saving…' : 'Save'}</button>
         </div>
       </form>
-      <h3 style={{ margin: '24px 0 12px' }}>Review keywords</h3>
+      <h3 style={{ margin: '24px 0 4px' }}>Branch override</h3>
+      <p className="muted small ckw-note">Leave empty to use the company's keywords.</p>
       {branch
         ? <BranchKeywordsPicker branchId={branch.id} categoryId={categoryId} />
         : <p className="muted small">Save the branch first, then choose its keywords.</p>}

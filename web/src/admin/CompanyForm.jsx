@@ -1,7 +1,9 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import Modal from '../ui/Modal';
 import Field from '../ui/Field';
+import KeywordChecklist from '../shared/KeywordChecklist';
+import { companyKeywordsMessage, loadCompanyKeywords } from '../shared/CompanyKeywordsPicker';
 import { must, supabase } from '../lib/db';
 import { errorMessage } from '../lib/format';
 
@@ -14,6 +16,23 @@ export default function CompanyForm({ company, categories, subcategories, onSave
   const [subcategoryId, setSubcategoryId] = useState(company?.subcategory_id ?? '');
   const [error, setError] = useState(null);
   const [busy, setBusy] = useState(false);
+  const [keywordIds, setKeywordIds] = useState([]);
+  const [archivedKeywords, setArchivedKeywords] = useState([]);
+  const [kwLoading, setKwLoading] = useState(Boolean(company));
+  const [kwFailed, setKwFailed] = useState(false);
+  const [savedId, setSavedId] = useState(null); // set once the company row exists, so a retry updates instead of inserting
+
+  useEffect(() => {
+    if (!company) return undefined;
+    let live = true;
+    loadCompanyKeywords(company.id).then((r) => {
+      if (!live) return;
+      setKeywordIds(r.selected);
+      setArchivedKeywords(r.archived);
+      setKwLoading(false);
+    }, (err) => { if (live) { setError(`Could not load keywords: ${errorMessage(err)}`); setKwFailed(true); setKwLoading(false); } });
+    return () => { live = false; };
+  }, [company]);
 
   const subOptions = subcategories.filter((s) => s.category_id === categoryId && (s.is_active || s.id === company?.subcategory_id));
 
@@ -27,13 +46,24 @@ export default function CompanyForm({ company, categories, subcategories, onSave
     setBusy(true);
     setError(null);
     const row = { name: name.trim(), subcategory_id: subcategoryId };
+    let companyId = savedId ?? company?.id ?? null;
     try {
-      await must(company
-        ? supabase.from('companies').update(row).eq('id', company.id).select()
-        : supabase.from('companies').insert(row).select());
-      onSaved();
-      onClose();
-    } catch (err) { setError(errorMessage(err)); setBusy(false); }
+      if (!companyId) {
+        const rows = await must(supabase.from('companies').insert(row).select());
+        companyId = rows[0].id;
+        setSavedId(companyId);
+      } else {
+        await must(supabase.from('companies').update(row).eq('id', companyId).select());
+      }
+    } catch (err) { setError(errorMessage(err)); setBusy(false); return; }
+    onSaved();
+    const { error: kwError } = await supabase.rpc('set_company_keywords', { p_company_id: companyId, p_keyword_ids: keywordIds });
+    if (kwError) {
+      setError(`Company saved, but keywords could not be saved: ${companyKeywordsMessage(kwError)}. Try again.`);
+      setBusy(false);
+      return;
+    }
+    onClose();
   }
 
   return (
@@ -56,10 +86,17 @@ export default function CompanyForm({ company, categories, subcategories, onSave
           </select>
         </Field>
         </>)}
+        <div>
+          <h3 style={{ margin: '8px 0 4px' }}>Review keywords</h3>
+          <p className="muted small ckw-note">Optional. Every branch without its own list uses these.</p>
+          {kwLoading
+            ? <p className="muted small" role="status">Loading keywords…</p>
+            : <KeywordChecklist categoryId={categoryId || null} selectedIds={keywordIds} onChange={setKeywordIds} archivedKeywords={archivedKeywords} disabled={busy} />}
+        </div>
         {error && <p className="alert" role="alert">{error}</p>}
         <div className="actions">
           <button type="button" className="btn" onClick={onClose}>Cancel</button>
-          <button className="btn primary" disabled={busy || !subcategoryId || usableCategories.length === 0}>{busy ? 'Saving…' : 'Save'}</button>
+          <button className="btn primary" disabled={busy || kwLoading || kwFailed || !subcategoryId || usableCategories.length === 0}>{busy ? 'Saving…' : 'Save'}</button>
         </div>
       </form>
     </Modal>

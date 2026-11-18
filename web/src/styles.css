@@ -641,3 +641,7 @@ button.rank-row:hover { background: var(--bg); }
 
 /* pc- : categories page "No subcategories" pill */
 .pc-empty { margin-left: var(--s2); background: var(--warn-soft); color: var(--warn-ink); }
+
+/* ckw- : company keywords */
+.ckw-note { margin: 0 0 var(--s2); }
+.ckw-head { margin: var(--s5, 24px) 0 var(--s3); font-size: 1.125rem; }
