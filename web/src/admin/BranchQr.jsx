@@ -3,11 +3,13 @@ import QRCode from 'qrcode';
 import NfcWriter from './NfcWriter';
 import Modal from '../ui/Modal';
 import { feedbackUrl } from '../lib/format';
+import { handoffUrl, nfcEnvironment } from '../lib/nfcSupport';
 
 export default function BranchQr({ branch, onClose }) {
   const canvas = useRef(null);
   const [copied, setCopied] = useState(false);
   const url = feedbackUrl(branch.slug);
+  const handoff = nfcEnvironment() === 'android-web-nfc' ? null : handoffUrl(branch.company_id, branch.id);
 
   useEffect(() => {
     if (canvas.current) void QRCode.toCanvas(canvas.current, url, { width: 220, margin: 2 });
@@ -30,8 +32,9 @@ export default function BranchQr({ branch, onClose }) {
         <canvas ref={canvas} role="img" aria-label={`QR code for ${branch.name}`} />
         <p className="small muted">Write this link to the NFC tag. The QR code is the camera backup.</p>
         <p className="mono">{url}</p>
+        <p className="small muted">Any phone can read the card. Only writing needs the steps below.</p>
       </div>
-      <NfcWriter url={url} />
+      <NfcWriter url={url} branchName={branch.name} handoff={handoff} />
       <div className="actions">
         <button type="button" className="btn" onClick={() => void copy()}>{copied ? 'Copied ✓' : 'Copy link'}</button>
         <a className="btn" href={url} target="_blank" rel="noopener noreferrer">Open</a>

@@ -1,19 +1,27 @@
 import { useState } from 'react';
-import { Navigate } from 'react-router-dom';
+import { Navigate, useLocation } from 'react-router-dom';
 import { useAuth } from './AuthContext';
 import PasswordField from './PasswordField';
 import Field from '../ui/Field';
 
 const STAR = 'M12 2.5l2.9 6.1 6.6.9-4.8 4.6 1.2 6.6L12 17.6 6.1 20.7l1.2-6.6L2.5 9.5l6.6-.9z';
 
+// Only same-origin /admin or /business paths are honoured (no "//", no scheme, no backslash).
+const safeFrom = (from, role) => {
+  if (typeof from !== 'string' || from.startsWith('//') || from.includes('\\')) return null;
+  const area = role === 'super_admin' ? ['/admin', '/business'] : ['/business'];
+  return area.some((a) => from === a || from.startsWith(`${a}/`) || from.startsWith(`${a}?`)) ? from : null;
+};
+
 export default function LoginPage() {
   const auth = useAuth();
+  const location = useLocation();
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [error, setError] = useState(null);
   const [busy, setBusy] = useState(false);
 
-  if (auth.status === 'signed_in') return <Navigate to={auth.profile?.role === 'super_admin' ? '/admin' : '/business'} replace />;
+  if (auth.status === 'signed_in') return <Navigate to={safeFrom(location.state?.from, auth.profile?.role) ?? (auth.profile?.role === 'super_admin' ? '/admin' : '/business')} replace />;
 
   async function submit(e) {
     e.preventDefault();

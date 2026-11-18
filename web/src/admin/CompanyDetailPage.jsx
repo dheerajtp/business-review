@@ -1,5 +1,5 @@
-import { useState } from 'react';
-import { Link, useParams } from 'react-router-dom';
+import { useEffect, useState } from 'react';
+import { Link, useParams, useSearchParams } from 'react-router-dom';
 import AdminLoginForm from './AdminLoginForm';
 import BranchForm from './BranchForm';
 import BranchQr from './BranchQr';
@@ -27,6 +27,18 @@ export default function CompanyDetailPage() {
   const [qr, setQr] = useState(null);
   const [toggling, setToggling] = useState(null);
   const [login, setLogin] = useState(false);
+  const [params, setParams] = useSearchParams();
+  const nfcParam = params.get('nfc');
+
+  // Deep link from the NFC hand-off QR: open that branch's dialog once, then drop the parameter.
+  useEffect(() => {
+    if (!nfcParam || !data) return;
+    const match = data.branches.find((b) => b.id === nfcParam && b.is_active);
+    if (match) setQr(match);
+    const next = new URLSearchParams(params);
+    next.delete('nfc');
+    setParams(next, { replace: true });
+  }, [nfcParam, data]); // eslint-disable-line react-hooks/exhaustive-deps
 
   if (loading && !data) return <ListSkeleton />;
   if (error || !data) return <ErrorState message={error ?? 'Company not found'} onRetry={reload} />;

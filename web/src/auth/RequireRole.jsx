@@ -1,11 +1,12 @@
-import { Navigate, Outlet } from 'react-router-dom';
+import { Navigate, Outlet, useLocation } from 'react-router-dom';
 import { useAuth } from './AuthContext';
 
 /** UX guard only. RLS is what actually protects the data. */
 export default function RequireRole({ role }) {
   const auth = useAuth();
+  const location = useLocation();
   if (auth.status === 'loading') return <div className="center" role="status">Loading…</div>;
-  if (auth.status === 'signed_out') return <Navigate to="/login" replace />;
+  if (auth.status === 'signed_out') return <Navigate to="/login" replace state={{ from: location.pathname + location.search }} />;
   if (auth.status === 'no_profile') {
     return (
       <div className="center">

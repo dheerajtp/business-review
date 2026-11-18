@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { supabase } from '../lib/db';
 import { errorMessage } from '../lib/format';
 
@@ -26,21 +26,27 @@ export default function KeywordChecklist({ categoryId = null, selectedIds, onCha
     return () => { live = false; };
   }, []);
 
+  // Rows never move when ticking/unticking: order and visibility do not depend on what is selected now.
+  // Keywords that were selected at any point while this list was open stay visible (pinned), so an
+  // already-saved pick from another category shows up, and unticking it does not make it disappear.
+  const pinned = useRef(new Set());
+  selectedIds.forEach((id) => pinned.current.add(id));
+
   const q = search.trim().toLowerCase();
   const rows = useMemo(() => {
     const activeIds = new Set(library.map((k) => k.id));
     const all = [...library, ...archivedKeywords.filter((k) => !activeIds.has(k.id))];
-    const pos = (id) => selectedIds.indexOf(id);
+    const group = (k) => (k.category_id === categoryId && categoryId !== null ? 0 : k.category_id === null ? 1 : 2);
     return all
       .filter((k) => (q ? k.label.toLowerCase().includes(q) : true))
-      .filter((k) => showAll || selectedIds.includes(k.id) || k.category_id === null || k.category_id === categoryId)
-      .sort((a, b) => {
-        const pa = pos(a.id);
-        const pb = pos(b.id);
-        if (pa >= 0 || pb >= 0) return (pa < 0 ? Infinity : pa) - (pb < 0 ? Infinity : pb);
-        return (a.sort_order ?? 0) - (b.sort_order ?? 0) || a.label.localeCompare(b.label);
-      });
-  }, [library, archivedKeywords, q, showAll, selectedIds, categoryId]);
+      .filter((k) => showAll || pinned.current.has(k.id) || k.category_id === null || k.category_id === categoryId)
+      .sort((a, b) => group(a) - group(b)
+        || (a.categories?.name ?? '').localeCompare(b.categories?.name ?? '')
+        || (a.sort_order ?? 0) - (b.sort_order ?? 0)
+        || a.label.localeCompare(b.label));
+    // selectedIds is deliberately not a dependency except to pick up newly pinned ids from a late load.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [library, archivedKeywords, q, showAll, categoryId, selectedIds.length === 0]);
 
   function toggle(id) {
     onChange(selectedIds.includes(id) ? selectedIds.filter((x) => x !== id) : selectedIds.length < MAX_KEYWORDS ? [...selectedIds, id] : selectedIds);
