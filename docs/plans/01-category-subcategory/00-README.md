@@ -1,5 +1,6 @@
 # 01 — Category, subcategory and keywords (replaces questions)
 
+Amended by plan 02: keywords are now a global library chosen per branch (see ../02-keyword-library/00-README.md).
 Master plan: none (repo has no `docs/PLAN.md`; `SPEC.md` is the product spec and is updated in slice 04) · Builds on: `supabase/migrations/20261005000001_init.sql`, `SPEC.md`
 
 ## Goal

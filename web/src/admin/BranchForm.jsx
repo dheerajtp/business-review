@@ -1,10 +1,11 @@
 import { useState } from 'react';
 import Modal from '../ui/Modal';
 import Field from '../ui/Field';
+import BranchKeywordsPicker from '../shared/BranchKeywordsPicker';
 import { must, supabase } from '../lib/db';
 import { errorMessage } from '../lib/format';
 
-export default function BranchForm({ companyId, branch, onSaved, onClose }) {
+export default function BranchForm({ companyId, categoryId = null, branch, onSaved, onClose }) {
   const [name, setName] = useState(branch?.name ?? '');
   const [placeId, setPlaceId] = useState(branch?.google_place_id ?? '');
   const [error, setError] = useState(null);
@@ -37,6 +38,10 @@ export default function BranchForm({ companyId, branch, onSaved, onClose }) {
           <button className="btn primary" disabled={busy}>{busy ? 'Saving…' : 'Save'}</button>
         </div>
       </form>
+      <h3 style={{ margin: '24px 0 12px' }}>Review keywords</h3>
+      {branch
+        ? <BranchKeywordsPicker branchId={branch.id} categoryId={categoryId} />
+        : <p className="muted small">Save the branch first, then choose its keywords.</p>}
     </Modal>
   );
 }

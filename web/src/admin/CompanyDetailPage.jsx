@@ -16,7 +16,7 @@ export default function CompanyDetailPage() {
   const { id = '' } = useParams();
   const { data, error, loading, reload } = useAsync(async () => {
     const [company, branches, logins] = await Promise.all([
-      must(supabase.from('companies').select('id,name,subcategory_id,is_active,subcategories(name,categories(name))').eq('id', id).single()) ,
+      must(supabase.from('companies').select('id,name,subcategory_id,is_active,subcategories(name,category_id,categories(name))').eq('id', id).single()) ,
       must(supabase.from('branches').select('id,company_id,name,slug,google_place_id,is_active').eq('company_id', id).order('name')),
       // The logins list must not take the whole page down if it fails (e.g. a migration not applied yet).
       must(supabase.rpc('list_business_admins', { p_company_id: id })).then((rows) => ({ rows }), (e) => ({ error: e.message })),
@@ -62,7 +62,7 @@ export default function CompanyDetailPage() {
       <h2 style={{ margin: '32px 0 12px' }}>Business logins</h2>
       <LoginList logins={logins.rows} error={logins.error} onAdd={() => setLogin(true)} />
 
-      {editing && <BranchForm companyId={company.id} branch={editing === 'new' ? null : editing} onSaved={reload} onClose={() => setEditing(null)} />}
+      {editing && <BranchForm companyId={company.id} categoryId={company.subcategories?.category_id ?? null} branch={editing === 'new' ? null : editing} onSaved={reload} onClose={() => setEditing(null)} />}
       {qr && <BranchQr branch={qr} onClose={() => setQr(null)} />}
       {login && <AdminLoginForm companyId={company.id} companyName={company.name} onCreated={reload} onClose={() => setLogin(false)} />}
       {toggling && (

@@ -3,18 +3,23 @@
 create temp table _ids (k text primary key, v uuid);
 grant all on _ids to anon, authenticated;
 
-\echo '--- seed: 8 categories, C4 subcategories, 6-8 active keywords each, idempotent'
+\echo '--- seed: 8 categories, C4 subcategories, keyword library (General >= 10, 6-8 per category), idempotent'
 do $$ begin
   assert (select count(*) from categories) = 8, 'seed has 8 categories, got ' || (select count(*) from categories);
   assert (select count(*) from subcategories) = 29, 'seed has 29 subcategories, got ' || (select count(*) from subcategories);
   assert (select count(*) from subcategories s join categories c on c.id = s.category_id
           where c.name = 'Restaurants & Cafes') = 5, 'Restaurants & Cafes has 5 subcategories';
-  assert not exists (
-    select 1 from subcategories s
-    where (select count(*) from keywords w where w.subcategory_id = s.id and w.is_active) not between 6 and 8
-  ), 'every subcategory has 6-8 active keywords';
   assert not exists (select 1 from categories c where not exists (select 1 from subcategories s where s.category_id = c.id)),
     'every category has subcategories';
+  assert (select count(*) from keywords where category_id is null and is_active) >= 10,
+    'General has >= 10 keywords, got ' || (select count(*) from keywords where category_id is null);
+  assert not exists (
+    select 1 from categories c
+    where (select count(*) from keywords w where w.category_id = c.id and w.is_active) not between 6 and 8
+  ), 'every category has 6-8 active keywords';
+  assert not exists (select 1 from keywords where label <> lower(label) or char_length(label) > 60),
+    'seed labels are lower case and <= 60 chars';
+  assert not exists (select 1 from branch_keywords), 'no branch picks after migration';
 end $$;
 create temp table _seed_counts as
   select (select count(*) from categories) c, (select count(*) from subcategories) s, (select count(*) from keywords) k;
@@ -22,8 +27,12 @@ create temp table _seed_counts as
 insert into categories (name) values ('RETAIL') on conflict do nothing;
 insert into subcategories (category_id, name)
   select id, 'cafe' from categories where name = 'Restaurants & Cafes' on conflict do nothing;
-insert into keywords (subcategory_id, label)
-  select s.id, 'coffee QUALITY' from subcategories s where s.name = 'Cafe' on conflict do nothing;
+insert into keywords (label) values ('FRIENDLY Staff') on conflict do nothing;
+insert into keywords (category_id, label)
+  select id, 'Best Coffee In Town' from categories where name = 'Restaurants & Cafes' on conflict do nothing;
+-- the label is unique across the whole library, not per category
+insert into keywords (category_id, label)
+  select id, 'tasty food' from categories where name = 'Retail' on conflict do nothing;
 do $$ begin
   assert (select c from _seed_counts) = (select count(*) from categories), 'seed re-run added a category';
   assert (select s from _seed_counts) = (select count(*) from subcategories), 'seed re-run added a subcategory';
@@ -42,21 +51,21 @@ insert into subcategories (id, category_id, name) values
   ('50000000-0000-0000-0000-000000000001', '10000000-0000-0000-0000-000000000001', 'Espresso bar'),
   ('50000000-0000-0000-0000-000000000002', '10000000-0000-0000-0000-000000000002', 'Sarees'),
   ('50000000-0000-0000-0000-000000000003', '10000000-0000-0000-0000-000000000001', 'Tea room');
--- Espresso bar: 9 active keywords (one more than the submit cap) + 1 archived.
-insert into keywords (id, subcategory_id, label, sort_order, is_active) values
-  ('60000000-0000-0000-0000-000000000001', '50000000-0000-0000-0000-000000000001', 'Coffee', 1, true),
-  ('60000000-0000-0000-0000-000000000002', '50000000-0000-0000-0000-000000000001', 'Ambience', 2, true),
-  ('60000000-0000-0000-0000-000000000003', '50000000-0000-0000-0000-000000000001', 'Staff', 3, true),
-  ('60000000-0000-0000-0000-000000000004', '50000000-0000-0000-0000-000000000001', 'Old menu', 4, false),
-  ('60000000-0000-0000-0000-000000000007', '50000000-0000-0000-0000-000000000001', 'Seating', 5, true),
-  ('60000000-0000-0000-0000-000000000008', '50000000-0000-0000-0000-000000000001', 'Music', 6, true),
-  ('60000000-0000-0000-0000-000000000009', '50000000-0000-0000-0000-000000000001', 'Wifi', 7, true),
-  ('60000000-0000-0000-0000-00000000000a', '50000000-0000-0000-0000-000000000001', 'Cleanliness', 8, true),
-  ('60000000-0000-0000-0000-00000000000b', '50000000-0000-0000-0000-000000000001', 'Pastries', 9, true),
-  -- same sort_order as Pastries: ties are broken by label, so Location comes before Pastries
-  ('60000000-0000-0000-0000-00000000000c', '50000000-0000-0000-0000-000000000001', 'Location', 9, true),
-  ('60000000-0000-0000-0000-000000000005', '50000000-0000-0000-0000-000000000002', 'Fabric', 1, true),
-  ('60000000-0000-0000-0000-000000000006', '50000000-0000-0000-0000-000000000003', 'Tea', 1, true);
+-- Library fixtures: 11 active keywords (one more than the cap) + 1 archived. Cafe category
+-- except Fabric (Boutique) and Wifi (General). Branch picks are made below via set_branch_keywords.
+insert into keywords (id, category_id, label, sort_order, is_active) values
+  ('60000000-0000-0000-0000-000000000001', '10000000-0000-0000-0000-000000000001', 'Coffee', 1, true),
+  ('60000000-0000-0000-0000-000000000002', '10000000-0000-0000-0000-000000000001', 'Ambience', 2, true),
+  ('60000000-0000-0000-0000-000000000003', '10000000-0000-0000-0000-000000000001', 'Staff', 3, true),
+  ('60000000-0000-0000-0000-000000000004', '10000000-0000-0000-0000-000000000001', 'Old menu', 4, false),
+  ('60000000-0000-0000-0000-000000000007', '10000000-0000-0000-0000-000000000001', 'Seating', 5, true),
+  ('60000000-0000-0000-0000-000000000008', '10000000-0000-0000-0000-000000000001', 'Music', 6, true),
+  ('60000000-0000-0000-0000-000000000009', null, 'Wifi', 7, true),
+  ('60000000-0000-0000-0000-00000000000a', '10000000-0000-0000-0000-000000000001', 'Cleanliness', 8, true),
+  ('60000000-0000-0000-0000-00000000000b', '10000000-0000-0000-0000-000000000001', 'Pastries', 9, true),
+  ('60000000-0000-0000-0000-00000000000c', '10000000-0000-0000-0000-000000000001', 'Location', 10, true),
+  ('60000000-0000-0000-0000-000000000005', '10000000-0000-0000-0000-000000000002', 'Fabric', 1, true),
+  ('60000000-0000-0000-0000-000000000006', '10000000-0000-0000-0000-000000000001', 'Tea', 11, true);
 insert into companies (id, name, subcategory_id) values
   ('20000000-0000-0000-0000-000000000001', 'Brew Co', '50000000-0000-0000-0000-000000000001'),
   ('20000000-0000-0000-0000-000000000002', 'Silk House', '50000000-0000-0000-0000-000000000002');
@@ -73,6 +82,94 @@ create function pg_temp.as_user(u text, r text) returns void language plpgsql as
 begin
   perform set_config('request.jwt.claim.sub', u, false);
   execute format('set role %I', r);
+end $$;
+
+\echo '--- set_branch_keywords: super admin, replace, ordering, duplicates, cap, unknown/archived'
+select pg_temp.as_user('00000000-0000-0000-0000-0000000000a1', 'authenticated');
+do $$ begin
+  perform set_branch_keywords('30000000-0000-0000-0000-000000000001',
+    array['60000000-0000-0000-0000-000000000003', '60000000-0000-0000-0000-000000000001']::uuid[]);
+  assert (select array_agg(keyword_id order by position) from branch_keywords
+          where branch_id = '30000000-0000-0000-0000-000000000001')
+         = array['60000000-0000-0000-0000-000000000003', '60000000-0000-0000-0000-000000000001']::uuid[], 'first set';
+  -- replaces the previous picks; duplicates merged at their first position; positions 1..n
+  perform set_branch_keywords('30000000-0000-0000-0000-000000000001',
+    array['60000000-0000-0000-0000-000000000002', '60000000-0000-0000-0000-000000000001',
+          '60000000-0000-0000-0000-000000000003', '60000000-0000-0000-0000-000000000002',
+          '60000000-0000-0000-0000-000000000007']::uuid[]);
+  assert (select array_agg(keyword_id order by position) from branch_keywords
+          where branch_id = '30000000-0000-0000-0000-000000000001')
+         = array['60000000-0000-0000-0000-000000000002', '60000000-0000-0000-0000-000000000001',
+                 '60000000-0000-0000-0000-000000000003', '60000000-0000-0000-0000-000000000007']::uuid[],
+         'replaced, deduped, in picked order';
+  assert (select array_agg(position order by position) from branch_keywords
+          where branch_id = '30000000-0000-0000-0000-000000000001') = array[1, 2, 3, 4], 'positions 1..n';
+  -- null = empty
+  perform set_branch_keywords('30000000-0000-0000-0000-000000000002',
+    array['60000000-0000-0000-0000-000000000006']::uuid[]);
+  perform set_branch_keywords('30000000-0000-0000-0000-000000000002', null);
+  assert not exists (select 1 from branch_keywords where branch_id = '30000000-0000-0000-0000-000000000002'), 'null clears';
+  perform set_branch_keywords('30000000-0000-0000-0000-000000000002',
+    array['60000000-0000-0000-0000-000000000005']::uuid[]);
+
+  begin perform set_branch_keywords('30000000-0000-0000-0000-000000000001',
+    (select array_agg(id) from keywords where id::text like '60000000-%' and is_active));
+    raise exception 'FAIL 11 keywords'; exception when sqlstate '22023' then
+      assert sqlerrm = 'too many keywords', 'too many message, got ' || sqlerrm; end;
+  begin perform set_branch_keywords('30000000-0000-0000-0000-000000000001',
+    array['60000000-0000-0000-0000-000000000001', '60000000-0000-0000-0000-000000000004']::uuid[]);
+    raise exception 'FAIL archived keyword'; exception when sqlstate '22023' then
+      assert sqlerrm = 'unknown keyword', 'unknown message, got ' || sqlerrm; end;
+  begin perform set_branch_keywords('30000000-0000-0000-0000-000000000001', array[gen_random_uuid()]);
+    raise exception 'FAIL random keyword id'; exception when sqlstate '22023' then null; end;
+  begin perform set_branch_keywords('30000000-0000-0000-0000-000000000001', array[null]::uuid[]);
+    raise exception 'FAIL null keyword id'; exception when sqlstate '22023' then null; end;
+  begin perform set_branch_keywords(gen_random_uuid(), '{}'::uuid[]);
+    raise exception 'FAIL unknown branch'; exception when sqlstate 'P0002' then null; end;
+  assert (select count(*) from branch_keywords where branch_id = '30000000-0000-0000-0000-000000000001') = 4,
+    'rejected calls leave the picks unchanged';
+
+  -- no direct writes, even for super admin
+  begin insert into branch_keywords values ('30000000-0000-0000-0000-000000000001', '60000000-0000-0000-0000-000000000008', 9);
+    raise exception 'FAIL super insert branch_keywords'; exception when insufficient_privilege then null; end;
+  begin update branch_keywords set position = 9; raise exception 'FAIL super update branch_keywords';
+  exception when insufficient_privilege then null; end;
+  begin delete from branch_keywords; raise exception 'FAIL super delete branch_keywords';
+  exception when insufficient_privilege then null; end;
+  assert (select count(*) from branch_keywords) = 5, 'super sees all picks';
+end $$;
+reset role;
+
+\echo '--- set_branch_keywords: business admin own branch only; no direct writes'
+select pg_temp.as_user('00000000-0000-0000-0000-0000000000b1', 'authenticated');
+do $$ begin
+  perform set_branch_keywords('30000000-0000-0000-0000-000000000001',
+    array['60000000-0000-0000-0000-000000000002', '60000000-0000-0000-0000-000000000001',
+          '60000000-0000-0000-0000-000000000003', '60000000-0000-0000-0000-000000000007']::uuid[]);
+  assert (select count(*) from branch_keywords) = 4, 'BA1 sees only own branch picks';
+  assert not exists (select 1 from branch_keywords where branch_id <> '30000000-0000-0000-0000-000000000001'), 'BA1 own rows only';
+  begin perform set_branch_keywords('30000000-0000-0000-0000-000000000002',
+    array['60000000-0000-0000-0000-000000000001']::uuid[]);
+    raise exception 'FAIL BA other company branch'; exception when sqlstate '42501' then
+      assert sqlerrm = 'forbidden', 'forbidden message, got ' || sqlerrm; end;
+  begin insert into branch_keywords values ('30000000-0000-0000-0000-000000000001', '60000000-0000-0000-0000-000000000008', 9);
+    raise exception 'FAIL BA insert branch_keywords'; exception when insufficient_privilege then null; end;
+  begin update branch_keywords set position = 9; raise exception 'FAIL BA update branch_keywords';
+  exception when insufficient_privilege then null; end;
+  begin delete from branch_keywords; raise exception 'FAIL BA delete branch_keywords';
+  exception when insufficient_privilege then null; end;
+end $$;
+reset role;
+select pg_temp.as_user('00000000-0000-0000-0000-0000000000b2', 'authenticated');
+do $$ begin
+  assert (select count(*) from branch_keywords) = 1, 'BA2 sees only own branch picks';
+  assert (select keyword_id from branch_keywords) = '60000000-0000-0000-0000-000000000005', 'BA2 pick';
+  begin perform set_branch_keywords('30000000-0000-0000-0000-000000000001', '{}'::uuid[]);
+    raise exception 'FAIL BA2 clears other company branch'; exception when sqlstate '42501' then null; end;
+end $$;
+reset role;
+do $$ begin
+  assert (select count(*) from branch_keywords) = 5, 'forbidden calls changed nothing';
 end $$;
 
 \echo '--- anon cannot read tables'
@@ -93,14 +190,24 @@ do $$ begin
   begin insert into subcategories (category_id, name) values ('10000000-0000-0000-0000-000000000001', 'x');
     raise exception 'FAIL anon insert subcategory';
   exception when insufficient_privilege then null; end;
-  begin insert into keywords (subcategory_id, label) values ('50000000-0000-0000-0000-000000000001', 'x');
+  begin insert into keywords (label) values ('x');
     raise exception 'FAIL anon insert keyword';
   exception when insufficient_privilege then null; end;
   begin update keywords set label = 'x'; raise exception 'FAIL anon update keyword';
   exception when insufficient_privilege then null; end;
+  begin perform 1 from branch_keywords; raise exception 'FAIL anon read branch_keywords';
+  exception when insufficient_privilege then null; end;
+  begin insert into branch_keywords values ('30000000-0000-0000-0000-000000000001', '60000000-0000-0000-0000-000000000008', 9);
+    raise exception 'FAIL anon insert branch_keywords';
+  exception when insufficient_privilege then null; end;
+  begin delete from branch_keywords; raise exception 'FAIL anon delete branch_keywords';
+  exception when insufficient_privilege then null; end;
+  begin perform set_branch_keywords('30000000-0000-0000-0000-000000000001', '{}'::uuid[]);
+    raise exception 'FAIL anon set_branch_keywords';
+  exception when insufficient_privilege then null; end;
 end $$;
 
-\echo '--- form RPC: names, active keywords ordered by sort_order then label, no leakage'
+\echo '--- form RPC: names, the branch''s active picks in picked order, no leakage'
 do $$
 declare f jsonb;
 begin
@@ -110,13 +217,13 @@ begin
   assert f->>'google_place_id' = 'PLACE_BREW', 'place id';
   assert f->>'category_name' = 'Cafe', 'category name';
   assert f->>'subcategory_name' = 'Espresso bar', 'subcategory name';
-  assert jsonb_array_length(f->'keywords') = 9, 'brew should have 9 active keywords, got ' || jsonb_array_length(f->'keywords');
-  assert f->'keywords'->0 = '{"id": "60000000-0000-0000-0000-000000000001", "label": "Coffee"}'::jsonb, 'first keyword is {id,label}';
+  assert jsonb_array_length(f->'keywords') = 4, 'brew should have 4 picked keywords, got ' || jsonb_array_length(f->'keywords');
+  assert f->'keywords'->0 = '{"id": "60000000-0000-0000-0000-000000000002", "label": "Ambience"}'::jsonb, 'first keyword is {id,label}';
   assert (select array_agg(e->>'label' order by n) from jsonb_array_elements(f->'keywords') with ordinality t(e, n))
-         = array['Coffee','Ambience','Staff','Seating','Music','Wifi','Cleanliness','Location','Pastries'],
-         'ordered by sort_order, label';
-  assert not exists (select 1 from jsonb_array_elements(f->'keywords') e where e->>'label' in ('Old menu', 'Tea', 'Fabric')),
-         'no archived or other-subcategory keywords';
+         = array['Ambience','Coffee','Staff','Seating'],
+         'ordered by picked position';
+  assert not exists (select 1 from jsonb_array_elements(f->'keywords') e where e->>'label' in ('Old menu', 'Tea', 'Fabric', 'Music')),
+         'no archived, unpicked or other-branch keywords';
   f := get_feedback_form('silk1');
   assert f->'keywords' = '[{"id": "60000000-0000-0000-0000-000000000005", "label": "Fabric"}]'::jsonb, 'silk has 1 keyword';
   assert get_feedback_form('nope') is null, 'unknown slug null';
@@ -138,9 +245,10 @@ begin
   begin perform submit_feedback('brew1', 6, '{}'::uuid[], null, null);
     raise exception 'FAIL rating 6'; exception when sqlstate '22023' then null; end;
   begin perform submit_feedback('brew1', 5, array['60000000-0000-0000-0000-000000000005']::uuid[], null, null);
-    raise exception 'FAIL keyword of another category'; exception when sqlstate '22023' then null; end;
+    raise exception 'FAIL keyword picked for another branch'; exception when sqlstate '22023' then
+      assert sqlerrm = 'unknown keyword', 'unknown message, got ' || sqlerrm; end;
   begin perform submit_feedback('brew1', 5, array['60000000-0000-0000-0000-000000000006']::uuid[], null, null);
-    raise exception 'FAIL keyword of another subcategory in the same category'; exception when sqlstate '22023' then null; end;
+    raise exception 'FAIL active keyword not picked for the branch'; exception when sqlstate '22023' then null; end;
   begin perform submit_feedback('brew1', 5,
     array['60000000-0000-0000-0000-000000000001', '60000000-0000-0000-0000-000000000004']::uuid[], null, null);
     raise exception 'FAIL archived keyword'; exception when sqlstate '22023' then null; end;
@@ -148,8 +256,12 @@ begin
     raise exception 'FAIL random keyword id'; exception when sqlstate '22023' then null; end;
   begin perform submit_feedback('brew1', 5, array[null]::uuid[], null, null);
     raise exception 'FAIL null keyword id'; exception when sqlstate '22023' then null; end;
-  begin perform submit_feedback('brew1', 5, (select array_agg(e->>'id')::uuid[] from jsonb_array_elements(get_feedback_form('brew1')->'keywords') e), null, null);
-    raise exception 'FAIL 9 keywords'; exception when sqlstate '22023' then
+  begin perform submit_feedback('brew1', 5, array[
+      '60000000-0000-0000-0000-000000000001', '60000000-0000-0000-0000-000000000002', '60000000-0000-0000-0000-000000000003',
+      '60000000-0000-0000-0000-000000000005', '60000000-0000-0000-0000-000000000006', '60000000-0000-0000-0000-000000000007',
+      '60000000-0000-0000-0000-000000000008', '60000000-0000-0000-0000-000000000009', '60000000-0000-0000-0000-00000000000a',
+      '60000000-0000-0000-0000-00000000000b', '60000000-0000-0000-0000-00000000000c']::uuid[], null, null);
+    raise exception 'FAIL 11 keywords'; exception when sqlstate '22023' then
       assert sqlerrm = 'too many keywords', 'too many message, got ' || sqlerrm; end;
   begin perform submit_feedback('brew1', 5, '{}'::uuid[], repeat('x', 2001), null);
     raise exception 'FAIL long comment'; exception when sqlstate '22023' then null; end;
@@ -178,6 +290,28 @@ do $$ begin
   assert (select keywords->1->>'label' from feedback_submissions where rating = 2) = 'Coffee', 'label snapshot kept';
 end $$;
 update keywords set label = 'Coffee' where id = '60000000-0000-0000-0000-000000000001';
+
+\echo '--- archived picks are hidden and rejected but kept; no picks = empty list'
+update keywords set is_active = false where id = '60000000-0000-0000-0000-000000000007';
+set role anon;
+do $$ begin
+  assert (select array_agg(e->>'label' order by n) from jsonb_array_elements(get_feedback_form('brew1')->'keywords') with ordinality t(e, n))
+         = array['Ambience','Coffee','Staff'], 'archived pick hidden from form';
+  begin perform submit_feedback('brew1', 5, array['60000000-0000-0000-0000-000000000007']::uuid[], null, null);
+    raise exception 'FAIL archived pick'; exception when sqlstate '22023' then null; end;
+end $$;
+reset role;
+do $$ begin
+  assert exists (select 1 from branch_keywords where keyword_id = '60000000-0000-0000-0000-000000000007'), 'archiving keeps the pick row';
+end $$;
+update keywords set is_active = true where id = '60000000-0000-0000-0000-000000000007';
+delete from branch_keywords where branch_id = '30000000-0000-0000-0000-000000000002';
+set role anon;
+do $$ begin
+  assert get_feedback_form('silk1')->'keywords' = '[]'::jsonb, 'no picks = empty list';
+end $$;
+reset role;
+insert into branch_keywords values ('30000000-0000-0000-0000-000000000002', '60000000-0000-0000-0000-000000000005', 1);
 
 \echo '--- inactive branch/company/subcategory/category are hidden and reject'
 create function pg_temp.check_silk_hidden(what text) returns void language plpgsql as $$
@@ -213,14 +347,17 @@ do $$ begin
   assert (select count(*) from companies) = 1;
   assert (select count(*) from branch_stats) = 1, 'stats scoped';
   assert (select count(*) from subcategories) = 32, 'BA reads all subcategories';
-  assert (select count(*) from keywords where subcategory_id = '50000000-0000-0000-0000-000000000001') = 10, 'BA reads keywords';
+  assert (select count(*) from keywords where category_id = '10000000-0000-0000-0000-000000000001') = 10, 'BA reads keywords';
+  assert (select count(*) from keywords where category_id is null) >= 11, 'BA reads General keywords';
   begin update branches set google_place_id = 'EVIL' where true;
     assert (select count(*) from branches where google_place_id = 'EVIL') = 0, 'FAIL BA update branch';
   exception when insufficient_privilege then null; end;
   begin insert into subcategories (category_id, name) values ('10000000-0000-0000-0000-000000000001', 'x');
     raise exception 'FAIL BA insert subcategory'; exception when insufficient_privilege then null; end;
-  begin insert into keywords (subcategory_id, label) values ('50000000-0000-0000-0000-000000000001', 'x');
+  begin insert into keywords (category_id, label) values ('10000000-0000-0000-0000-000000000001', 'x');
     raise exception 'FAIL BA insert keyword'; exception when insufficient_privilege then null; end;
+  begin insert into keywords (label) values ('y');
+    raise exception 'FAIL BA insert General keyword'; exception when insufficient_privilege then null; end;
   update subcategories set name = 'EVIL' where true;
   assert not exists (select 1 from subcategories where name = 'EVIL'), 'FAIL BA update subcategory';
   update keywords set label = 'EVIL', is_active = false where true;
@@ -250,14 +387,24 @@ do $$ begin
   assert (select count(*) from companies) = 2;
   insert into subcategories (id, category_id, name, sort_order)
     values ('50000000-0000-0000-0000-000000000009', '10000000-0000-0000-0000-000000000001', 'Roastery', 3);
-  insert into keywords (id, subcategory_id, label, sort_order)
-    values ('60000000-0000-0000-0000-000000000099', '50000000-0000-0000-0000-000000000009', 'Beans', 1);
+  insert into keywords (id, category_id, label, sort_order)
+    values ('60000000-0000-0000-0000-000000000099', '10000000-0000-0000-0000-000000000001', 'Beans', 12);
+  update keywords set label = 'Roasted beans', category_id = null where id = '60000000-0000-0000-0000-000000000099';
+  assert (select label from keywords where id = '60000000-0000-0000-0000-000000000099' and category_id is null) = 'Roasted beans',
+    'super edits label and category';
+  insert into keywords (label) values (repeat('x', 60));
   update subcategories set name = 'Roastery & Bar' where id = '50000000-0000-0000-0000-000000000009';
   update keywords set is_active = false where id = '60000000-0000-0000-0000-000000000099';
   assert (select name from subcategories where id = '50000000-0000-0000-0000-000000000009') = 'Roastery & Bar', 'super renames';
   assert not (select is_active from keywords where id = '60000000-0000-0000-0000-000000000099'), 'super archives';
-  begin insert into keywords (subcategory_id, label) values ('50000000-0000-0000-0000-000000000009', 'BEANS');
+  begin insert into keywords (category_id, label) values ('10000000-0000-0000-0000-000000000002', 'ROASTED Beans');
     raise exception 'FAIL duplicate keyword label'; exception when unique_violation then null; end;
+  begin insert into keywords (label) values ('Value For Money');
+    raise exception 'FAIL duplicate seed label'; exception when unique_violation then null; end;
+  begin insert into keywords (label) values (repeat('x', 61));
+    raise exception 'FAIL 61-char label'; exception when check_violation then null; end;
+  begin insert into keywords (label) values ('');
+    raise exception 'FAIL empty label'; exception when check_violation then null; end;
   begin delete from keywords where id = '60000000-0000-0000-0000-000000000099'; raise exception 'FAIL super delete keyword';
   exception when insufficient_privilege then null; end;
   begin delete from subcategories where id = '50000000-0000-0000-0000-000000000009'; raise exception 'FAIL super delete subcategory';
@@ -354,7 +501,11 @@ do $$ begin
   assert (select count(*) from categories) = 0;
   assert (select count(*) from subcategories) = 0;
   assert (select count(*) from keywords) = 0;
+  assert (select count(*) from branch_keywords) = 0;
   assert (select count(*) from feedback_submissions) = 0;
+  begin perform set_branch_keywords('30000000-0000-0000-0000-000000000001', '{}'::uuid[]);
+    raise exception 'FAIL no-profile set_branch_keywords'; exception when sqlstate '42501' then
+      assert sqlerrm = 'forbidden', 'forbidden message, got ' || sqlerrm; end;
 end $$;
 reset role;
 \echo 'ALL RLS TESTS PASSED'

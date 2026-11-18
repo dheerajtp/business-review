@@ -1,7 +1,6 @@
 import { useState } from 'react';
 import CategoryForm from './CategoryForm';
 import SubcategoryForm from './SubcategoryForm';
-import KeywordForm from './KeywordForm';
 import ConfirmDialog from '../ui/ConfirmDialog';
 import EmptyState from '../ui/EmptyState';
 import ErrorState from '../ui/ErrorState';
@@ -58,27 +57,22 @@ export default function CategoriesPage() {
   const subs = useAsync(() => (catId
     ? must(supabase.from('subcategories').select('id,name,is_active,sort_order').eq('category_id', catId))
     : Promise.resolve([])), [catId]);
-  const kws = useAsync(() => (subId
-    ? must(supabase.from('keywords').select('id,label,is_active,sort_order').eq('subcategory_id', subId))
-    : Promise.resolve([])), [subId]);
-  // editing: { kind: 'category'|'subcategory'|'keyword', row: object|null }
+  // editing: { kind: 'category'|'subcategory', row: object|null }
   const [editing, setEditing] = useState(null);
   const [toggling, setToggling] = useState(null);
 
   const cat = cats.data?.find((c) => c.id === catId);
-  const sub = subs.data?.find((s) => s.id === subId);
-  const TABLES = { category: 'categories', subcategory: 'subcategories', keyword: 'keywords' };
-  const RELOAD = { category: cats.reload, subcategory: subs.reload, keyword: kws.reload };
+  const TABLES = { category: 'categories', subcategory: 'subcategories' };
+  const RELOAD = { category: cats.reload, subcategory: subs.reload };
   const name = (t) => t.row.name ?? t.row.label;
   const WARN = {
     category: 'It is hidden from company pickers until restored. Existing feedback and companies are kept.',
     subcategory: 'It is hidden from company pickers until restored. Existing feedback and companies are kept.',
-    keyword: 'Customers will no longer see this keyword. Existing feedback is kept.',
   };
 
   return (
     <>
-      <PageHead title="Categories" subtitle="Category, then subcategory, then the keywords customers can pick." />
+      <PageHead title="Categories" subtitle="Categories and the subcategories companies pick from." />
       <div className="tax-grid">
         <Level
           title="Categories" rows={cats.data} labelKey="name" state={cats}
@@ -90,25 +84,15 @@ export default function CategoriesPage() {
         {cat ? (
           <Level
             title={`Subcategories of ${cat.name}`} rows={subs.loading ? null : subs.data} labelKey="name" state={subs}
-            selectedId={subId} onSelect={setSubId}
             newLabel="New subcategory" onNew={() => setEditing({ kind: 'subcategory', row: null })}
             onEdit={(row) => setEditing({ kind: 'subcategory', row })} onToggle={(row) => setToggling({ kind: 'subcategory', row })}
             emptyTitle="No subcategories yet" emptyHint="Companies pick a subcategory, such as Coffee shop."
           />
         ) : <p className="muted tax-hint">Select a category to see its subcategories.</p>}
-        {cat && sub ? (
-          <Level
-            title={`Keywords for ${sub.name}`} rows={kws.loading ? null : kws.data} labelKey="label" state={kws}
-            newLabel="New keyword" onNew={() => setEditing({ kind: 'keyword', row: null })}
-            onEdit={(row) => setEditing({ kind: 'keyword', row })} onToggle={(row) => setToggling({ kind: 'keyword', row })}
-            emptyTitle="No keywords yet" emptyHint="Short tags customers can tap, such as Friendly staff."
-          />
-        ) : cat && <p className="muted tax-hint">Select a subcategory to see its keywords.</p>}
       </div>
 
       {editing?.kind === 'category' && <CategoryForm category={editing.row} nextOrder={nextOrder(cats.data)} onSaved={cats.reload} onClose={() => setEditing(null)} />}
       {editing?.kind === 'subcategory' && <SubcategoryForm categoryId={catId} subcategory={editing.row} nextOrder={nextOrder(subs.data)} onSaved={subs.reload} onClose={() => setEditing(null)} />}
-      {editing?.kind === 'keyword' && <KeywordForm subcategoryId={subId} keyword={editing.row} nextOrder={nextOrder(kws.data)} onSaved={kws.reload} onClose={() => setEditing(null)} />}
       {toggling && (
         <ConfirmDialog
           title={toggling.row.is_active ? `Archive ${name(toggling)}?` : `Restore ${name(toggling)}?`}

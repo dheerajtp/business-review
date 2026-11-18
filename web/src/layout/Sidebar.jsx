@@ -6,11 +6,12 @@ import { useNewFeedback } from '../notify/NewFeedbackContext';
 // [path, label, icon, end]
 const SUPER = [
   ['Overview', [['/admin', 'Dashboard', 'chart', true], ['/admin/feedback', 'Feedback', 'feedback', false]]],
-  ['Set up', [['/admin/categories', 'Categories', 'categories', false]]],
+  ['Set up', [['/admin/categories', 'Categories', 'categories', false], ['/admin/keywords', 'Keywords', 'keywords', false]]],
   ['Manage', [['/admin/companies', 'Companies', 'companies', false]]],
 ];
 const BUSINESS = [
   ['Overview', [['/business', 'Feedback', 'feedback', true]]],
+  ['Set up', [['/business/keywords', 'Keywords', 'keywords', false]]],
 ];
 
 export default function Sidebar({ open, collapsed, onToggleCollapse, onNavigate }) {
