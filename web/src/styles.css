@@ -638,3 +638,6 @@ button.rank-row:hover { background: var(--bg); }
 .bkw-ok { color: var(--good); font-weight: 600; }
 .bkw-card { display: grid; gap: var(--s3); align-items: stretch; }
 .bkw-card-head { display: flex; justify-content: space-between; align-items: center; gap: var(--s3); flex-wrap: wrap; }
+
+/* pc- : categories page "No subcategories" pill */
+.pc-empty { margin-left: var(--s2); background: var(--warn-soft); color: var(--warn-ink); }

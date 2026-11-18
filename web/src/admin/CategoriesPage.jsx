@@ -15,7 +15,7 @@ const ordered = (rows, key) => [...(rows ?? [])].sort((a, b) =>
   Number(b.is_active) - Number(a.is_active) || a.sort_order - b.sort_order || a[key].localeCompare(b[key]));
 
 /** One level of the taxonomy: a titled list with New/Edit/Archive/Restore and optional row selection. */
-function Level({ title, hint, rows, labelKey, selectedId, onSelect, onNew, onEdit, onToggle, state, emptyTitle, emptyHint, newLabel }) {
+function Level({ badge, title, hint, rows, labelKey, selectedId, onSelect, onNew, onEdit, onToggle, state, emptyTitle, emptyHint, newLabel }) {
   return (
     <section className="tax-col" aria-label={title}>
       <header className="tax-head">
@@ -33,7 +33,7 @@ function Level({ title, hint, rows, labelKey, selectedId, onSelect, onNew, onEdi
           <div key={r.id} className={`item${r.is_active ? '' : ' dim'}${r.id === selectedId ? ' tax-selected' : ''}`}>
             {onSelect ? (
               <button type="button" className="tax-pick" aria-pressed={r.id === selectedId} onClick={() => onSelect(r.id)}>
-                <span className="title">{r[labelKey]} {!r.is_active && <span className="pill off">Archived</span>}</span>
+                <span className="title">{r[labelKey]} {!r.is_active && <span className="pill off">Archived</span>}{badge?.(r)}</span>
                 {r.description && <span className="muted small">{r.description}</span>}
               </button>
             ) : (
@@ -57,13 +57,16 @@ export default function CategoriesPage() {
   const subs = useAsync(() => (catId
     ? must(supabase.from('subcategories').select('id,name,is_active,sort_order').eq('category_id', catId))
     : Promise.resolve([])), [catId]);
+  const allSubs = useAsync(() => must(supabase.from('subcategories').select('category_id,is_active')), []);
+  const withActiveSub = new Set((allSubs.data ?? []).filter((s) => s.is_active).map((s) => s.category_id));
+  const noSubs = (r) => (allSubs.data && !withActiveSub.has(r.id) ? <span className="pill pc-empty">No subcategories</span> : null);
   // editing: { kind: 'category'|'subcategory', row: object|null }
   const [editing, setEditing] = useState(null);
   const [toggling, setToggling] = useState(null);
 
   const cat = cats.data?.find((c) => c.id === catId);
   const TABLES = { category: 'categories', subcategory: 'subcategories' };
-  const RELOAD = { category: cats.reload, subcategory: subs.reload };
+  const RELOAD = { category: cats.reload, subcategory: () => { subs.reload(); allSubs.reload(); } };
   const name = (t) => t.row.name ?? t.row.label;
   const WARN = {
     category: 'It is hidden from company pickers until restored. Existing feedback and companies are kept.',
@@ -75,7 +78,7 @@ export default function CategoriesPage() {
       <PageHead title="Categories" subtitle="Categories and the subcategories companies pick from." />
       <div className="tax-grid">
         <Level
-          title="Categories" rows={cats.data} labelKey="name" state={cats}
+          title="Categories" badge={noSubs} rows={cats.data} labelKey="name" state={cats}
           selectedId={catId} onSelect={(id) => { setCatId(id); setSubId(null); }}
           newLabel="New category" onNew={() => setEditing({ kind: 'category', row: null })}
           onEdit={(row) => setEditing({ kind: 'category', row })} onToggle={(row) => setToggling({ kind: 'category', row })}
@@ -92,7 +95,7 @@ export default function CategoriesPage() {
       </div>
 
       {editing?.kind === 'category' && <CategoryForm category={editing.row} nextOrder={nextOrder(cats.data)} onSaved={cats.reload} onClose={() => setEditing(null)} />}
-      {editing?.kind === 'subcategory' && <SubcategoryForm categoryId={catId} subcategory={editing.row} nextOrder={nextOrder(subs.data)} onSaved={subs.reload} onClose={() => setEditing(null)} />}
+      {editing?.kind === 'subcategory' && <SubcategoryForm categoryId={catId} subcategory={editing.row} nextOrder={nextOrder(subs.data)} onSaved={() => { subs.reload(); allSubs.reload(); }} onClose={() => setEditing(null)} />}
       {toggling && (
         <ConfirmDialog
           title={toggling.row.is_active ? `Archive ${name(toggling)}?` : `Restore ${name(toggling)}?`}

@@ -39,6 +39,25 @@ do $$ begin
   assert (select k from _seed_counts) = (select count(*) from keywords), 'seed re-run added a keyword';
 end $$;
 
+\echo '--- prune empty categories: category without subcategories goes, its keywords become General'
+insert into categories (name) values ('Empty cat');
+insert into keywords (category_id, label)
+  select id, 'empty cat keyword' from categories where name = 'Empty cat';
+update keywords set category_id = null
+where category_id in (
+  select c.id from categories c
+  where not exists (select 1 from subcategories s where s.category_id = c.id)
+);
+delete from categories c
+where not exists (select 1 from subcategories s where s.category_id = c.id);
+do $$ begin
+  assert not exists (select 1 from categories where name = 'Empty cat'), 'empty category deleted';
+  assert exists (select 1 from keywords where label = 'empty cat keyword' and category_id is null), 'keyword kept as General';
+  assert (select count(*) from categories) = 8, 'seeded categories intact, got ' || (select count(*) from categories);
+  assert (select count(*) from subcategories) = 29, 'subcategories intact, got ' || (select count(*) from subcategories);
+end $$;
+delete from keywords where label = 'empty cat keyword';
+
 insert into auth.users (id, email) values
   ('00000000-0000-0000-0000-0000000000a1', 'super@x'),
   ('00000000-0000-0000-0000-0000000000b1', 'cafe@x'),
