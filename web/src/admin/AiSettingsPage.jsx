@@ -1,0 +1,192 @@
+import { useState } from 'react';
+import ConfirmDialog from '../ui/ConfirmDialog';
+import ErrorState from '../ui/ErrorState';
+import Field from '../ui/Field';
+import ListSkeleton from '../ui/ListSkeleton';
+import PageHead from '../ui/PageHead';
+import { must, supabase } from '../lib/db';
+import { errorMessage } from '../lib/format';
+import { useAsync } from '../lib/useAsync';
+
+const PROVIDERS = [
+  { id: 'gemini', name: 'Gemini', model: 'gemini-2.5-flash' },
+  { id: 'anthropic', name: 'Claude (Anthropic)', model: 'claude-haiku-5-5' },
+  { id: 'openai', name: 'OpenAI (GPT)', model: 'gpt-4o-mini', url: 'optional' },
+  { id: 'custom', name: 'Custom (OpenAI-compatible)', model: 'model name', url: 'required' },
+];
+
+const TEST_REASONS = {
+  no_key: 'Save a key first.',
+  auth: 'The provider rejected the key.',
+  model: 'The model name or base URL looks wrong.',
+  network: "Couldn't reach the provider.",
+  timeout: 'The provider took too long.',
+};
+
+function rpcError(e) {
+  const m = errorMessage(e);
+  if (m === 'forbidden') return 'Only a Super Admin can change this.';
+  if (m.includes('provider has no key')) return 'Save a key for this provider first.';
+  if (m.includes('invalid base url')) return 'Use a public https address (no localhost, IP addresses or internal hosts).';
+  return m;
+}
+
+function ProviderCard({ meta, row, onChanged }) {
+  const [model, setModel] = useState(row?.model ?? '');
+  const [baseUrl, setBaseUrl] = useState(row?.base_url ?? '');
+  const [key, setKey] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState(null); // { ok, text }
+  const [removing, setRemoving] = useState(false);
+  const hasKey = !!row?.has_key;
+
+  async function save(e) {
+    e.preventDefault();
+    setBusy(true);
+    setMsg(null);
+    try {
+      await must(supabase.rpc('set_ai_provider', {
+        p_provider: meta.id,
+        p_model: model.trim(),
+        p_base_url: meta.url ? baseUrl.trim() || null : null,
+        p_api_key: key || null,
+      }));
+      setKey('');
+      setMsg({ ok: true, text: 'Saved.' });
+      onChanged();
+    } catch (err) {
+      setMsg({ ok: false, text: rpcError(err) });
+    }
+    setBusy(false);
+  }
+
+  async function test() {
+    setBusy(true);
+    setMsg(null);
+    try {
+      const { data, error } = await supabase.functions.invoke('test-ai', { body: { provider: meta.id } });
+      if (error) setMsg({ ok: false, text: 'Test failed.' });
+      else if (data?.ok) setMsg({ ok: true, text: `Works. Sample: ${data.sample}` });
+      else setMsg({ ok: false, text: TEST_REASONS[data?.reason] ?? 'Test failed.' });
+    } catch {
+      setMsg({ ok: false, text: 'Test failed.' });
+    }
+    setBusy(false);
+  }
+
+  return (
+    <form className="card ai-card" onSubmit={save}>
+      <div className="ai-head">
+        <h2 className="ai-title">{meta.name}</h2>
+        <span className={`pill${hasKey ? '' : ' off'}`}>{hasKey ? 'Key saved' : 'No key'}</span>
+      </div>
+      <Field label="Model">
+        <input className="input" value={model} maxLength={100} required placeholder={meta.model} onChange={(e) => setModel(e.target.value)} />
+      </Field>
+      {meta.url && (
+        <Field label={meta.url === 'required' ? 'Base URL' : 'Base URL (optional)'}>
+          <input className="input" type="url" value={baseUrl} maxLength={300} required={meta.url === 'required'} placeholder="https://api.openai.com/v1" onChange={(e) => setBaseUrl(e.target.value)} />
+        </Field>
+      )}
+      <Field label="API key" hint={hasKey ? `Saved, ending ${row.key_hint}` : undefined}>
+        <input className="input" type="password" autoComplete="off" maxLength={400} value={key} placeholder={hasKey ? 'Leave empty to keep the saved key' : 'Paste the API key'} onChange={(e) => setKey(e.target.value)} />
+      </Field>
+      {msg && <p className={`alert${msg.ok ? ' ok' : ''}`} role={msg.ok ? 'status' : 'alert'}>{msg.text}</p>}
+      <div className="ai-actions">
+        <button type="submit" className="btn primary" disabled={busy}>{busy ? 'Working…' : 'Save'}</button>
+        <button type="button" className="btn" disabled={busy || !hasKey} onClick={test}>Test</button>
+        {hasKey && <button type="button" className="btn danger" disabled={busy} onClick={() => setRemoving(true)}>Remove key</button>}
+      </div>
+      {removing && (
+        <ConfirmDialog
+          title={`Remove the ${meta.name} key?`}
+          message="AI reviews will be switched off if this is the active provider."
+          confirmLabel="Remove key"
+          onClose={() => setRemoving(false)}
+          onConfirm={async () => {
+            try { await must(supabase.rpc('clear_ai_provider_key', { p_provider: meta.id })); } catch (err) { throw new Error(rpcError(err)); }
+            setKey('');
+            onChanged();
+          }}
+        />
+      )}
+    </form>
+  );
+}
+
+function GlobalSettings({ data, onChanged }) {
+  const [active, setActive] = useState(data.active_provider ?? '');
+  const [enabled, setEnabled] = useState(!!data.is_enabled);
+  const [limit, setLimit] = useState(String(data.daily_limit ?? 200));
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState(null);
+  const withKey = PROVIDERS.filter((p) => data.providers?.find((r) => r.provider === p.id)?.has_key);
+  const activeHasKey = withKey.some((p) => p.id === active);
+
+  async function save(e) {
+    e.preventDefault();
+    setBusy(true);
+    setMsg(null);
+    try {
+      await must(supabase.rpc('set_ai_settings', {
+        p_active_provider: active,
+        p_is_enabled: enabled && activeHasKey,
+        p_daily_limit: Number(limit),
+      }));
+      setMsg({ ok: true, text: 'Saved.' });
+      onChanged();
+    } catch (err) {
+      setMsg({ ok: false, text: rpcError(err) });
+    }
+    setBusy(false);
+  }
+
+  return (
+    <form className="card ai-card" onSubmit={save}>
+      <h2 className="ai-title">Settings</h2>
+      <Field label="Active provider" hint={withKey.length ? undefined : 'Save a key for a provider below first.'}>
+        <select className="select" value={active} onChange={(e) => setActive(e.target.value)}>
+          {!activeHasKey && <option value="">Choose a provider</option>}
+          {withKey.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
+        </select>
+      </Field>
+      <div className="field">
+        <label className="check">
+          <input type="checkbox" checked={enabled && activeHasKey} disabled={!activeHasKey} onChange={(e) => setEnabled(e.target.checked)} />
+          <span>Enable AI reviews</span>
+        </label>
+        {!activeHasKey && <span className="hint">Choose a provider that has a saved key to turn this on.</span>}
+      </div>
+      <Field label="Daily limit" hint="Most AI reviews that can be generated per day, across all customers.">
+        <input className="input" type="number" min={1} max={100000} step={1} required value={limit} onChange={(e) => setLimit(e.target.value)} />
+      </Field>
+      {msg && <p className={`alert${msg.ok ? ' ok' : ''}`} role={msg.ok ? 'status' : 'alert'}>{msg.text}</p>}
+      <div className="ai-actions">
+        <button type="submit" className="btn primary" disabled={busy || !active}>{busy ? 'Working…' : 'Save'}</button>
+      </div>
+    </form>
+  );
+}
+
+export default function AiSettingsPage() {
+  const s = useAsync(() => must(supabase.rpc('get_ai_settings')), []);
+  const d = s.data;
+  const stamp = d ? JSON.stringify([d.active_provider, d.is_enabled, d.daily_limit]) : '';
+
+  return (
+    <>
+      <PageHead title="AI review" subtitle="Choose the AI provider that helps customers write their review. Keys are write-only and never shown again." />
+      {s.loading && !d && <ListSkeleton />}
+      {s.error && <ErrorState message={s.error} onRetry={s.reload} />}
+      {d && (
+        <div className="ai-grid">
+          <GlobalSettings key={stamp + d.providers?.map((r) => `${r.provider}${r.has_key}`).join()} data={d} onChanged={s.reload} />
+          {PROVIDERS.map((p) => {
+            const row = d.providers?.find((r) => r.provider === p.id);
+            return <ProviderCard key={`${p.id}${row?.updated_at ?? ''}${row?.has_key ?? ''}`} meta={p} row={row} onChanged={s.reload} />;
+          })}
+        </div>
+      )}
+    </>
+  );
+}

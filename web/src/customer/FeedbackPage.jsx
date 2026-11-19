@@ -57,5 +57,5 @@ export default function FeedbackPage({ slug }) {
   }
   if (submissionId) return <ThankYou form={load.form} draft={draft} submissionId={submissionId} />;
 
-  return <FeedbackFormView form={load.form} draft={draft} onDraft={setDraft} onSubmit={() => void submit()} submitting={submitting} error={error} />;
+  return <FeedbackFormView slug={slug} form={load.form} draft={draft} onDraft={setDraft} onSubmit={() => void submit()} submitting={submitting} error={error} />;
 }

@@ -653,3 +653,10 @@ button.rank-row:hover { background: var(--bg); }
 .nfc-actions { gap: var(--s2); flex-wrap: wrap; }
 .nfc-handoff { display: grid; place-items: center; gap: var(--s2); margin-top: var(--s3); }
 .nfc-handoff canvas { width: 160px; height: 160px; border: 1px solid var(--line); border-radius: var(--r-sm); background: #fff; }
+
+/* ai- admin AI settings */
+.ai-grid { display: grid; gap: var(--s4); grid-template-columns: repeat(auto-fit, minmax(min(100%, 340px), 1fr)); align-items: start; }
+.ai-card { display: grid; gap: var(--s3); }
+.ai-head { display: flex; align-items: center; justify-content: space-between; gap: var(--s3); }
+.ai-title { margin: 0; font-size: 1.0625rem; }
+.ai-actions { display: flex; flex-wrap: wrap; gap: var(--s2); }

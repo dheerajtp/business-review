@@ -6,7 +6,7 @@ import { useNewFeedback } from '../notify/NewFeedbackContext';
 // [path, label, icon, end]
 const SUPER = [
   ['Overview', [['/admin', 'Dashboard', 'chart', true], ['/admin/feedback', 'Feedback', 'feedback', false]]],
-  ['Set up', [['/admin/categories', 'Categories', 'categories', false], ['/admin/keywords', 'Keywords', 'keywords', false]]],
+  ['Set up', [['/admin/categories', 'Categories', 'categories', false], ['/admin/keywords', 'Keywords', 'keywords', false], ['/admin/ai', 'AI review', 'ai', false]]],
   ['Manage', [['/admin/companies', 'Companies', 'companies', false]]],
 ];
 const BUSINESS = [

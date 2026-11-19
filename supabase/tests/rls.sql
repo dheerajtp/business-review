@@ -719,6 +719,425 @@ end $$;
 reset role;
 insert into branch_keywords values ('30000000-0000-0000-0000-000000000002', '60000000-0000-0000-0000-000000000005', 1);
 
+\echo '--- ai: tables closed to every client role; form flag off by default'
+-- run every direct read/write on the AI tables as the given role; each must be refused
+create function pg_temp.check_ai_closed(u text, r text) returns void language plpgsql as $$
+declare q text;
+begin
+  perform set_config('request.jwt.claim.sub', u, true);
+  execute format('set local role %I', r);
+  foreach q in array array[
+    'select 1 from public.ai_settings',
+    'insert into public.ai_settings (id) values (true)',
+    'update public.ai_settings set is_enabled = true',
+    'delete from public.ai_settings',
+    'select 1 from public.ai_providers',
+    'insert into public.ai_providers (provider, model) values (''gemini'', ''x'')',
+    'update public.ai_providers set model = ''x''',
+    'delete from public.ai_providers',
+    'select 1 from public.ai_generation_log',
+    'insert into public.ai_generation_log (branch_id, client_hash) values (''30000000-0000-0000-0000-000000000001'', ''x'')',
+    'update public.ai_generation_log set client_hash = ''x''',
+    'delete from public.ai_generation_log'
+  ] loop
+    begin execute q; raise exception 'FAIL % direct access: %', r, q;
+    exception when insufficient_privilege then null; end;
+  end loop;
+  reset role;
+end $$;
+select pg_temp.check_ai_closed('', 'anon');
+select pg_temp.check_ai_closed('00000000-0000-0000-0000-0000000000a1', 'authenticated');
+select pg_temp.check_ai_closed('00000000-0000-0000-0000-0000000000b1', 'authenticated');
+set role anon;
+do $$ begin
+  assert get_feedback_form('brew1')->'ai_enabled' = 'false'::jsonb, 'ai_enabled false by default';
+end $$;
+reset role;
+
+\echo '--- ai admin RPCs: business admin and anon are forbidden'
+select pg_temp.as_user('00000000-0000-0000-0000-0000000000b1', 'authenticated');
+do $$ begin
+  begin perform set_ai_provider('gemini', 'gemini-2.5-flash', null, 'test-key-1234');
+    raise exception 'FAIL BA set_ai_provider'; exception when sqlstate '42501' then
+      assert sqlerrm = 'forbidden', 'forbidden message, got ' || sqlerrm; end;
+  begin perform clear_ai_provider_key('gemini');
+    raise exception 'FAIL BA clear_ai_provider_key'; exception when sqlstate '42501' then
+      assert sqlerrm = 'forbidden', 'forbidden message, got ' || sqlerrm; end;
+  begin perform set_ai_settings('gemini', false, 100);
+    raise exception 'FAIL BA set_ai_settings'; exception when sqlstate '42501' then
+      assert sqlerrm = 'forbidden', 'forbidden message, got ' || sqlerrm; end;
+  begin perform get_ai_settings();
+    raise exception 'FAIL BA get_ai_settings'; exception when sqlstate '42501' then
+      assert sqlerrm = 'forbidden', 'forbidden message, got ' || sqlerrm; end;
+end $$;
+reset role;
+set role anon;
+do $$ begin
+  begin perform set_ai_provider('gemini', 'gemini-2.5-flash', null, 'test-key-1234');
+    raise exception 'FAIL anon set_ai_provider'; exception when sqlstate '42501' then null; end;
+  begin perform clear_ai_provider_key('gemini');
+    raise exception 'FAIL anon clear_ai_provider_key'; exception when sqlstate '42501' then null; end;
+  begin perform set_ai_settings('gemini', false, 100);
+    raise exception 'FAIL anon set_ai_settings'; exception when sqlstate '42501' then null; end;
+  begin perform get_ai_settings();
+    raise exception 'FAIL anon get_ai_settings'; exception when sqlstate '42501' then null; end;
+end $$;
+reset role;
+do $$ begin
+  assert not exists (select 1 from ai_providers), 'forbidden calls saved nothing';
+  assert not exists (select 1 from vault.secrets), 'forbidden calls stored no secret';
+end $$;
+
+\echo '--- ai admin RPCs: super admin saves a provider; key is write-only'
+select pg_temp.as_user('00000000-0000-0000-0000-0000000000a1', 'authenticated');
+do $$
+declare s jsonb;
+begin
+  s := get_ai_settings();
+  assert s->'active_provider' = 'null'::jsonb, 'no active provider by default';
+  assert s->'is_enabled' = 'false'::jsonb, 'disabled by default';
+  assert (s->>'daily_limit')::int = 2000, 'default daily limit';
+  assert s->'providers' = '[]'::jsonb, 'no providers by default';
+  begin perform set_ai_settings('gemini', true, 2000);
+    raise exception 'FAIL enable without provider'; exception when sqlstate '22023' then
+      assert sqlerrm = 'provider has no key', 'no key message, got ' || sqlerrm; end;
+  -- saved without a key
+  perform set_ai_provider('gemini', 'gemini-2.5-flash', null);
+  s := get_ai_settings()->'providers'->0;
+  assert s->>'provider' = 'gemini' and s->>'model' = 'gemini-2.5-flash', 'provider saved';
+  assert s->'has_key' = 'false'::jsonb and s->'key_hint' = 'null'::jsonb, 'no key yet';
+  begin perform set_ai_settings('gemini', true, 2000);
+    raise exception 'FAIL enable provider without key'; exception when sqlstate '22023' then
+      assert sqlerrm = 'provider has no key', 'no key message, got ' || sqlerrm; end;
+  -- first key
+  perform set_ai_provider('gemini', 'gemini-2.5-flash', null, 'test-key-1234');
+  s := get_ai_settings()->'providers'->0;
+  assert s->'has_key' = 'true'::jsonb, 'has key';
+  assert s->>'key_hint' = '1234', 'key hint is the last 4 characters';
+end $$;
+reset role;
+do $$ begin
+  assert (select count(*) from vault.secrets where name = 'ai_key_gemini') = 1, 'one vault secret for gemini';
+  assert (select d.decrypted_secret from ai_providers p join vault.decrypted_secrets d on d.id = p.secret_id
+          where p.provider = 'gemini') = 'test-key-1234', 'key stored in vault';
+  assert (select key_hint from ai_providers where provider = 'gemini') = '1234', 'table keeps only the hint';
+  insert into _ids select 'gemini_secret', secret_id from ai_providers where provider = 'gemini';
+end $$;
+
+\echo '--- ai admin RPCs: null key keeps the key, a new key replaces it; output never has the key'
+select pg_temp.as_user('00000000-0000-0000-0000-0000000000a1', 'authenticated');
+do $$
+declare s jsonb;
+begin
+  perform set_ai_provider('gemini', 'gemini-2.5-pro', null, null);
+  perform set_ai_provider('gemini', 'gemini-2.5-pro', '', '');
+  s := get_ai_settings()->'providers'->0;
+  assert s->>'model' = 'gemini-2.5-pro', 'model updated';
+  assert s->'has_key' = 'true'::jsonb and s->>'key_hint' = '1234', 'null/empty key keeps the key';
+end $$;
+reset role;
+do $$ begin
+  assert (select secret_id from ai_providers where provider = 'gemini') = (select v from _ids where k = 'gemini_secret'),
+    'same secret kept';
+  assert (select decrypted_secret from vault.decrypted_secrets where name = 'ai_key_gemini') = 'test-key-1234',
+    'key unchanged';
+end $$;
+select pg_temp.as_user('00000000-0000-0000-0000-0000000000a1', 'authenticated');
+do $$
+declare s jsonb;
+begin
+  perform set_ai_provider('gemini', 'gemini-2.5-pro', null, 'test-key-5678');
+  s := get_ai_settings();
+  assert s->'providers'->0->>'key_hint' = '5678', 'new key updates the hint';
+  assert position('test-key' in s::text) = 0, 'settings output has no key';
+  assert position((select v::text from _ids where k = 'gemini_secret') in s::text) = 0, 'settings output has no secret id';
+  assert not (s->'providers'->0 ? 'secret_id') and not (s->'providers'->0 ? 'api_key'), 'no secret fields';
+end $$;
+reset role;
+do $$ begin
+  assert (select secret_id from ai_providers where provider = 'gemini') = (select v from _ids where k = 'gemini_secret'),
+    'replacement updates the same vault secret';
+  assert (select decrypted_secret from vault.decrypted_secrets where name = 'ai_key_gemini') = 'test-key-5678',
+    'key replaced';
+  assert (select count(*) from vault.secrets) = 1, 'no extra vault secret';
+end $$;
+
+\echo '--- ai admin RPCs: input validation and the base URL guard'
+select pg_temp.as_user('00000000-0000-0000-0000-0000000000a1', 'authenticated');
+do $$
+declare u text;
+begin
+  begin perform set_ai_provider('bogus', 'm', null, null);
+    raise exception 'FAIL bogus provider'; exception when sqlstate '22023' then null; end;
+  begin perform set_ai_provider('gemini', '', null, null);
+    raise exception 'FAIL empty model'; exception when sqlstate '22023' then null; end;
+  begin perform set_ai_provider('gemini', repeat('m', 101), null, null);
+    raise exception 'FAIL 101-char model'; exception when sqlstate '22023' then null; end;
+  begin perform set_ai_provider('gemini', 'gemini-2.5-pro', 'https://api.example.com', null);
+    raise exception 'FAIL gemini base url'; exception when sqlstate '22023' then null; end;
+  begin perform set_ai_provider('anthropic', 'claude-haiku-5-5', 'https://api.example.com', null);
+    raise exception 'FAIL anthropic base url'; exception when sqlstate '22023' then null; end;
+  begin perform set_ai_provider('gemini', 'gemini-2.5-pro', null, 'short');
+    raise exception 'FAIL short key'; exception when sqlstate '22023' then null; end;
+  begin perform set_ai_provider('gemini', 'gemini-2.5-pro', null, 'test key 1234');
+    raise exception 'FAIL key with spaces'; exception when sqlstate '22023' then null; end;
+  begin perform set_ai_provider('gemini', 'gemini-2.5-pro', null, 'test-key-' || repeat('x', 392));
+    raise exception 'FAIL 401-char key'; exception when sqlstate '22023' then null; end;
+  begin perform set_ai_provider('custom', 'my-model', null, 'test-key-9999');
+    raise exception 'FAIL custom without base url'; exception when sqlstate '22023' then
+      assert sqlerrm = 'invalid base url', 'base url message, got ' || sqlerrm; end;
+  foreach u in array array[
+    'http://api.example.com/v1',
+    'https://localhost/v1',
+    'https://LOCALHOST:8080/v1',
+    'https://127.0.0.1/v1',
+    'https://[::1]/v1',
+    'https://llm.corp.internal/v1',
+    'https://printer.local/v1',
+    'https://user:pass@api.example.com/v1',
+    'https://api.example.com/v1?x=1',
+    'https://' || repeat('a', 300) || '.com'
+  ] loop
+    begin perform set_ai_provider('custom', 'my-model', u, 'test-key-9999');
+      raise exception 'FAIL custom base url %', u; exception when sqlstate '22023' then
+        assert sqlerrm = 'invalid base url', 'base url message for ' || u || ', got ' || sqlerrm; end;
+  end loop;
+  assert jsonb_array_length(get_ai_settings()->'providers') = 1, 'rejected calls saved nothing';
+  assert (get_ai_settings()->'providers'->0->>'key_hint') = '5678', 'rejected calls kept the key';
+
+  -- valid custom and openai; trailing slash stripped
+  perform set_ai_provider('custom', 'my-model', 'https://api.example.com/v1/', 'test-key-9999');
+  perform set_ai_provider('openai', 'gpt-4o-mini', null, null);
+  perform set_ai_provider('openai', 'gpt-4o-mini', 'https://api.openai.com/v1', null);
+  assert (select e->>'base_url' from jsonb_array_elements(get_ai_settings()->'providers') e
+          where e->>'provider' = 'custom') = 'https://api.example.com/v1', 'custom base url saved without trailing slash';
+  assert (select e->'has_key' from jsonb_array_elements(get_ai_settings()->'providers') e
+          where e->>'provider' = 'openai') = 'false'::jsonb, 'openai saved without a key';
+  assert jsonb_array_length(get_ai_settings()->'providers') = 3, 'three providers saved';
+end $$;
+reset role;
+
+\echo '--- ai settings: validation, enable needs a key, clearing the key disables'
+select pg_temp.as_user('00000000-0000-0000-0000-0000000000a1', 'authenticated');
+do $$
+declare s jsonb;
+begin
+  begin perform set_ai_settings('bogus', false, 100);
+    raise exception 'FAIL bogus active provider'; exception when sqlstate '22023' then null; end;
+  begin perform set_ai_settings('gemini', false, 0);
+    raise exception 'FAIL daily limit 0'; exception when sqlstate '22023' then null; end;
+  begin perform set_ai_settings('gemini', false, 100001);
+    raise exception 'FAIL daily limit 100001'; exception when sqlstate '22023' then null; end;
+  begin perform set_ai_settings('gemini', false, null);
+    raise exception 'FAIL daily limit null'; exception when sqlstate '22023' then null; end;
+  begin perform set_ai_settings('openai', true, 100);
+    raise exception 'FAIL enable openai without key'; exception when sqlstate '22023' then
+      assert sqlerrm = 'provider has no key', 'no key message, got ' || sqlerrm; end;
+  begin perform set_ai_settings(null, true, 100);
+    raise exception 'FAIL enable without active provider'; exception when sqlstate '22023' then null; end;
+  perform set_ai_settings('gemini', true, 2000);
+  s := get_ai_settings();
+  assert s->>'active_provider' = 'gemini' and s->'is_enabled' = 'true'::jsonb, 'enabled with a key';
+end $$;
+reset role;
+set role anon;
+do $$ begin
+  assert get_feedback_form('brew1')->'ai_enabled' = 'true'::jsonb, 'ai_enabled true once enabled with a key';
+end $$;
+reset role;
+select pg_temp.as_user('00000000-0000-0000-0000-0000000000a1', 'authenticated');
+do $$
+declare s jsonb;
+begin
+  perform clear_ai_provider_key('gemini');
+  s := get_ai_settings();
+  assert s->'is_enabled' = 'false'::jsonb, 'clearing the active key disables';
+  assert s->>'active_provider' = 'gemini', 'active provider kept';
+  assert (select e->'has_key' from jsonb_array_elements(s->'providers') e where e->>'provider' = 'gemini') = 'false'::jsonb,
+    'gemini key cleared';
+  assert (select e->'key_hint' from jsonb_array_elements(s->'providers') e where e->>'provider' = 'gemini') = 'null'::jsonb,
+    'gemini hint cleared';
+end $$;
+reset role;
+do $$ begin
+  assert not exists (select 1 from vault.secrets where name = 'ai_key_gemini'), 'vault secret deleted';
+  assert (select secret_id from ai_providers where provider = 'gemini') is null, 'secret id cleared';
+  assert exists (select 1 from vault.secrets where name = 'ai_key_custom'), 'other provider key kept';
+end $$;
+set role anon;
+do $$ begin
+  assert get_feedback_form('brew1')->'ai_enabled' = 'false'::jsonb, 'ai_enabled false after the key is cleared';
+end $$;
+reset role;
+-- a fresh gemini key, saved but not enabled yet
+select pg_temp.as_user('00000000-0000-0000-0000-0000000000a1', 'authenticated');
+do $$ begin
+  perform set_ai_provider('gemini', 'gemini-2.5-pro', null, 'test-key-1234');
+end $$;
+reset role;
+
+\echo '--- ai runtime RPCs: not executable by anon or authenticated (even super admin)'
+create function pg_temp.check_ai_runtime_closed(u text, r text) returns void language plpgsql as $$
+declare q text;
+begin
+  perform set_config('request.jwt.claim.sub', u, true);
+  execute format('set local role %I', r);
+  foreach q in array array[
+    'select public.get_ai_runtime()',
+    'select public.get_ai_provider_runtime(''gemini'')',
+    'select public.get_review_context(''brew1'', ''{}''::uuid[])',
+    'select public.log_ai_generation(''30000000-0000-0000-0000-000000000001'', ''x'')',
+    'select public.ai_valid_base_url(''https://api.example.com'')'
+  ] loop
+    begin execute q; raise exception 'FAIL % runtime call: %', r, q;
+    exception when insufficient_privilege then null; end;
+  end loop;
+  reset role;
+end $$;
+select pg_temp.check_ai_runtime_closed('', 'anon');
+select pg_temp.check_ai_runtime_closed('00000000-0000-0000-0000-0000000000a1', 'authenticated');
+select pg_temp.check_ai_runtime_closed('00000000-0000-0000-0000-0000000000b1', 'authenticated');
+
+\echo '--- ai runtime RPCs: service role reads the key only when enabled / for a provider with a key'
+set role service_role;
+do $$
+declare r jsonb;
+begin
+  assert get_ai_runtime() is null, 'disabled = no runtime';
+  r := get_ai_provider_runtime('gemini');
+  assert r->>'provider' = 'gemini' and r->>'model' = 'gemini-2.5-pro', 'gemini runtime';
+  assert r->>'api_key' = 'test-key-1234', 'gemini runtime key';
+  assert r->'base_url' = 'null'::jsonb and (r->>'daily_limit')::int = 2000, 'gemini runtime base url and limit';
+  r := get_ai_provider_runtime('custom');
+  assert r->>'api_key' = 'test-key-9999' and r->>'base_url' = 'https://api.example.com/v1', 'custom runtime';
+  assert get_ai_provider_runtime('openai') is null, 'provider without a key = null';
+  assert get_ai_provider_runtime('anthropic') is null, 'unsaved provider = null';
+  assert get_ai_provider_runtime('bogus') is null, 'unknown provider = null';
+end $$;
+reset role;
+select pg_temp.as_user('00000000-0000-0000-0000-0000000000a1', 'authenticated');
+do $$ begin
+  perform set_ai_settings('gemini', true, 2000);
+end $$;
+reset role;
+set role service_role;
+do $$
+declare r jsonb;
+begin
+  r := get_ai_runtime();
+  assert r->>'provider' = 'gemini' and r->>'model' = 'gemini-2.5-pro', 'enabled runtime provider';
+  assert r->>'api_key' = 'test-key-1234' and (r->>'daily_limit')::int = 2000, 'enabled runtime key and limit';
+end $$;
+reset role;
+
+\echo '--- get_review_context: valid, inherited, unknown slug, outside the effective set, more than 10'
+set role service_role;
+do $$
+declare r jsonb;
+begin
+  r := get_review_context('brew1', array['60000000-0000-0000-0000-000000000003', '60000000-0000-0000-0000-000000000002',
+                                          '60000000-0000-0000-0000-000000000003']::uuid[]);
+  assert r->>'branch_id' = '30000000-0000-0000-0000-000000000001', 'branch id';
+  assert r->>'company_name' = 'Brew Co' and r->>'branch_name' = 'Brew MG Road', 'names';
+  assert r->>'category_name' = 'Cafe' and r->>'subcategory_name' = 'Espresso bar', 'taxonomy names';
+  assert r->'labels' = '["Staff", "Ambience"]'::jsonb, 'labels in request order, duplicates merged, got ' || (r->'labels')::text;
+  assert get_review_context('leaf1', array['60000000-0000-0000-0000-000000000001', '60000000-0000-0000-0000-000000000006']::uuid[])->'labels'
+         = '["Coffee", "Tea"]'::jsonb, 'inherited company keywords accepted';
+  assert get_review_context('brew1', '{}'::uuid[])->'labels' = '[]'::jsonb, 'no keywords = []';
+  assert get_review_context('nope', array['60000000-0000-0000-0000-000000000001']::uuid[]) is null, 'unknown slug = null';
+  begin perform get_review_context('brew1', array['60000000-0000-0000-0000-000000000006']::uuid[]);
+    raise exception 'FAIL keyword outside the effective set'; exception when sqlstate '22023' then
+      assert sqlerrm = 'unknown keyword', 'unknown message, got ' || sqlerrm; end;
+  begin perform get_review_context('brew1', array['60000000-0000-0000-0000-000000000004']::uuid[]);
+    raise exception 'FAIL archived keyword'; exception when sqlstate '22023' then null; end;
+  begin perform get_review_context('brew1', array[null]::uuid[]);
+    raise exception 'FAIL null keyword id'; exception when sqlstate '22023' then null; end;
+  begin perform get_review_context('brew1', array[
+      '60000000-0000-0000-0000-000000000001', '60000000-0000-0000-0000-000000000002', '60000000-0000-0000-0000-000000000003',
+      '60000000-0000-0000-0000-000000000005', '60000000-0000-0000-0000-000000000006', '60000000-0000-0000-0000-000000000007',
+      '60000000-0000-0000-0000-000000000008', '60000000-0000-0000-0000-000000000009', '60000000-0000-0000-0000-00000000000a',
+      '60000000-0000-0000-0000-00000000000b', '60000000-0000-0000-0000-00000000000c']::uuid[]);
+    raise exception 'FAIL 11 keywords'; exception when sqlstate '22023' then null; end;
+end $$;
+reset role;
+update branches set is_active = false where slug = 'brew1';
+set role service_role;
+do $$ begin
+  assert get_review_context('brew1', array['60000000-0000-0000-0000-000000000002']::uuid[]) is null, 'inactive branch = null';
+end $$;
+reset role;
+update branches set is_active = true where slug = 'brew1';
+update companies set is_active = false where id = '20000000-0000-0000-0000-000000000001';
+set role service_role;
+do $$ begin
+  assert get_review_context('brew1', array['60000000-0000-0000-0000-000000000002']::uuid[]) is null, 'inactive company = null';
+end $$;
+reset role;
+update companies set is_active = true where id = '20000000-0000-0000-0000-000000000001';
+
+\echo '--- log_ai_generation: 6 per client per 10 minutes, daily limit, old rows pruned'
+insert into ai_generation_log (branch_id, client_hash, created_at)
+  values ('30000000-0000-0000-0000-000000000001', 'hash-old', now() - interval '8 days');
+set role service_role;
+do $$
+declare i int;
+begin
+  for i in 1..6 loop
+    assert log_ai_generation('30000000-0000-0000-0000-000000000001', 'hash-a'), 'generation ' || i || ' allowed';
+  end loop;
+  assert not log_ai_generation('30000000-0000-0000-0000-000000000001', 'hash-a'), '7th for the same client refused';
+  assert log_ai_generation('30000000-0000-0000-0000-000000000001', 'hash-b'), 'another client allowed';
+end $$;
+reset role;
+do $$ begin
+  assert (select count(*) from ai_generation_log) = 7, 'refused call stored nothing; old row pruned, got '
+    || (select count(*) from ai_generation_log);
+  assert not exists (select 1 from ai_generation_log where client_hash = 'hash-old'), 'rows older than 7 days deleted';
+end $$;
+select pg_temp.as_user('00000000-0000-0000-0000-0000000000a1', 'authenticated');
+do $$ begin
+  perform set_ai_settings('gemini', true, 8);
+end $$;
+reset role;
+set role service_role;
+do $$ begin
+  assert log_ai_generation('30000000-0000-0000-0000-000000000002', 'hash-c'), '8th of the day allowed';
+  assert not log_ai_generation('30000000-0000-0000-0000-000000000002', 'hash-d'), 'daily limit reached';
+end $$;
+reset role;
+do $$ begin
+  assert (select count(*) from ai_generation_log) = 8, 'daily limit refusal stored nothing';
+end $$;
+
+\echo '--- get_feedback_form.ai_enabled: needs enabled + a key on the active provider'
+set role anon;
+do $$
+declare f jsonb;
+begin
+  f := get_feedback_form('brew1');
+  assert f->'ai_enabled' = 'true'::jsonb, 'enabled with a key';
+  assert f->>'branch_name' = 'Brew MG Road' and jsonb_array_length(f->'keywords') = 4, 'existing fields kept';
+  assert get_feedback_form('nope') is null, 'unknown slug still null';
+end $$;
+reset role;
+update ai_settings set active_provider = 'openai';
+set role anon;
+do $$ begin
+  assert get_feedback_form('brew1')->'ai_enabled' = 'false'::jsonb, 'active provider without a key = false';
+end $$;
+reset role;
+update ai_settings set active_provider = 'gemini';
+select pg_temp.as_user('00000000-0000-0000-0000-0000000000a1', 'authenticated');
+do $$ begin
+  perform set_ai_settings('gemini', false, 2000);
+end $$;
+reset role;
+set role anon;
+do $$ begin
+  assert get_feedback_form('brew1')->'ai_enabled' = 'false'::jsonb, 'disabled = false';
+end $$;
+reset role;
+
 \echo '--- user without profile sees nothing'
 select pg_temp.as_user('00000000-0000-0000-0000-00000000dead', 'authenticated');
 do $$ begin

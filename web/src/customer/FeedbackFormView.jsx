@@ -2,9 +2,11 @@ import { useState } from 'react';
 import StarRating from './StarRating';
 import { composeReview } from './reviewText';
 import { MAX_KEYWORDS } from '../lib/types';
+import { supabase } from '../lib/db';
 
-export default function FeedbackFormView({ form, draft, onDraft, onSubmit, submitting, error, preview }) {
+export default function FeedbackFormView({ form, draft, onDraft, onSubmit, submitting, error, preview, slug }) {
   const [edited, setEdited] = useState(false);
+  const [ai, setAi] = useState({ loading: false, used: false, msg: '' });
   const keywords = form.keywords ?? [];
 
   // Re-compose the draft review until the customer types in the box; manual edits are never overwritten.
@@ -18,6 +20,28 @@ export default function FeedbackFormView({ form, draft, onDraft, onSubmit, submi
     const on = draft.keywordIds.includes(id);
     const keywordIds = on ? draft.keywordIds.filter((x) => x !== id) : [...draft.keywordIds, id];
     onDraft(withReview({ ...draft, keywordIds }));
+  }
+
+  async function generate() {
+    setAi((a) => ({ ...a, loading: true, msg: '' }));
+    let timer;
+    try {
+      const call = supabase.functions.invoke('generate-review', { body: { slug, rating: draft.rating, keyword_ids: draft.keywordIds } });
+      const timeout = new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('timeout')), 10000); });
+      const { data, error: err } = await Promise.race([call, timeout]);
+      if (err || typeof data?.review !== 'string' || !data.review.trim()) {
+        const msg = err?.context?.status === 429 ? 'Please try again in a few minutes.' : "Couldn't generate right now. You can edit the text below.";
+        setAi((a) => ({ ...a, loading: false, msg }));
+        return;
+      }
+      setEdited(true);
+      onDraft({ ...draft, comment: data.review.slice(0, 2000) });
+      setAi({ loading: false, used: true, msg: '' });
+    } catch {
+      setAi((a) => ({ ...a, loading: false, msg: "Couldn't generate right now. You can edit the text below." }));
+    } finally {
+      clearTimeout(timer);
+    }
   }
 
   function submit(e) {
@@ -53,6 +77,16 @@ export default function FeedbackFormView({ form, draft, onDraft, onSubmit, submi
                   })}
                 </div>
               </fieldset>
+            )}
+
+            {form.ai_enabled === true && draft.keywordIds.length >= 1 && (
+              <div className="stack">
+                <button type="button" className="btn" disabled={ai.loading} aria-busy={ai.loading} onClick={() => void generate()}>
+                  {ai.loading ? 'Writing…' : ai.used ? 'Regenerate' : 'Write my review with AI'}
+                </button>
+                {ai.msg && <p className="muted small" role="status">{ai.msg}</p>}
+                {ai.used && !ai.msg && <p className="muted small">Suggested by AI. Edit it so it matches your visit.</p>}
+              </div>
             )}
 
             <label className="field qblock">

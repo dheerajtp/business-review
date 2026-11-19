@@ -11,6 +11,7 @@ const FeedbackListPage = lazy(() => import('./shared/FeedbackListPage'));
 const DashboardPage = lazy(() => import('./admin/DashboardPage'));
 const CategoriesPage = lazy(() => import('./admin/CategoriesPage'));
 const KeywordsPage = lazy(() => import('./admin/KeywordsPage'));
+const AiSettingsPage = lazy(() => import('./admin/AiSettingsPage'));
 const CompaniesPage = lazy(() => import('./admin/CompaniesPage'));
 const CompanyDetailPage = lazy(() => import('./admin/CompanyDetailPage'));
 const BusinessKeywordsPage = lazy(() => import('./business/KeywordsPage'));
@@ -32,6 +33,7 @@ export default function App() {
                       <Route path="/admin/feedback" element={<FeedbackListPage />} />
                       <Route path="/admin/categories" element={<CategoriesPage />} />
                       <Route path="/admin/keywords" element={<KeywordsPage />} />
+                      <Route path="/admin/ai" element={<AiSettingsPage />} />
                       <Route path="/admin/companies" element={<CompaniesPage />} />
                       <Route path="/admin/companies/:id" element={<CompanyDetailPage />} />
                     </Route>
