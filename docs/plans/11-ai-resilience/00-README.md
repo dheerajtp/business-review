@@ -1,0 +1,47 @@
+# 11 — AI resilience: retries, fallback model, and a Test that tolerates a busy provider
+
+Master plan: none (`SPEC.md` gets a short update in slice 02) · Builds on and amends: [`../10-ai-test-gate/00-README.md`](../10-ai-test-gate/00-README.md) (T2, T7), [`../08-ai-diagnostics-and-models/00-README.md`](../08-ai-diagnostics-and-models/00-README.md) (G4), [`../06-ai-review-generation/00-README.md`](../06-ai-review-generation/00-README.md) (A5 timeout)
+
+## Goal
+- A short Gemini overload (HTTP 503 "high demand") no longer blocks setup or makes customers see a failure: calls retry with backoff, and an optional fallback model is tried next.
+- Test treats "the provider is busy" as "key and model accepted", so AI can be enabled while Google is overloaded.
+- Configuration errors (bad key, wrong model) still fail Test and still switch the button off, as in plan 10.
+
+## Decisions (already made; do not revisit)
+| # | Decision |
+| --- | --- |
+| F1 | **Schema.** New migration `supabase/migrations/20261125000001_ai_resilience.sql` (never edit earlier ones): `alter table public.ai_providers add column fallback_model text null check (fallback_model is null or char_length(fallback_model) between 1 and 100), add column last_test_busy boolean not null default false`. |
+| F2 | **Fallback RPC.** `set_ai_fallback_model(p_provider text, p_model text) returns void`, security definer, `set search_path = public`, `revoke all from public, anon`, `grant execute to authenticated`; `42501 'forbidden'` unless super admin; provider must be one of the four values (`22023`); `p_model` null or blank clears it, otherwise 1–100 characters after trim; updates the provider row (no row = `22023 'save the provider first'`). It does **not** reset the test result. |
+| F3 | **record_ai_test gets a busy flag.** `drop function public.record_ai_test(text, boolean)` and create `record_ai_test(p_provider text, p_ok boolean, p_busy boolean default false) returns void` (same rules, grants `service_role` only); it sets `last_test_ok = coalesce(p_ok,false)`, `last_test_busy = coalesce(p_busy,false) and coalesce(p_ok,false)`, `last_tested_at = now()`. `set_ai_provider` and `clear_ai_provider_key` (recreate with `create or replace`, identical signatures) also reset `last_test_busy = false` wherever they reset `last_test_ok`. The enable gate (plan 10 T4) and the form flag (T5) are unchanged: they read `last_test_ok`. |
+| F4 | **Reads include the new fields.** Drop and recreate `get_ai_settings()` (adds `fallback_model` and `last_test_busy` to each provider entry; still no key or `secret_id`), `get_ai_runtime()` and `get_ai_provider_runtime(text)` (add `fallback_model`; same grants as today). Copy the current bodies from `20261124000001_ai_test_gate.sql` and `20261122000001_remove_ai_limits.sql` and change only what is listed. |
+| F5 | **Resilient generation helper.** `supabase/functions/_shared/providers.js` exports `generateResilient({ ...generateArgs, fallback_model, attempts, delaysMs, signal })` returning `{ text, model_used, used_fallback }`. It calls `generate` with the primary model; on a `ProviderError` of kind `unavailable` it waits `delaysMs[i]` (abort-aware) and retries, up to `attempts` calls in total. If the primary still fails with kind `unavailable` or `model`, and `fallback_model` is set and differs from the primary, it tries the fallback model once (same single `signal`, no extra retries). Kinds `auth`, `quota`, `network`, `timeout`, `unknown` and an empty text are never retried and never trigger the fallback. The last `ProviderError` is rethrown with an added `model` field (the model of the last attempt). The existing `generateWithRetry` is removed once unused. |
+| F6 | **Customer endpoint.** `generate-review` uses `generateResilient` with `attempts: 3`, `delaysMs: [600, 1500]`, one `AbortController` with a 12 s total deadline (was 8 s), `fallback_model` from `get_ai_runtime()`. Responses, status codes (`502 ai_failed` etc.), log lines and the plan 09 error logging stay as they are, except the logged `model` is the last attempt's model; on success after a fallback nothing extra is logged or returned. The plan 10 self-switch-off (kinds `auth`/`model` only) is unchanged. |
+| F7 | **Test endpoint.** `test-ai` action `test` uses `generateResilient` with `attempts: 4`, `delaysMs: [1000, 2000, 3000]`, a 22 s total deadline, and the provider's `fallback_model`. Outcomes: success → `record_ai_test(provider, true, false)` and `{ ok:true, sample, model_used, used_fallback }`; final failure of kind `unavailable` (provider busy, key and model accepted) → `record_ai_test(provider, true, true)` and `{ ok:true, busy:true, status, detail }`; any other failure → `record_ai_test(provider, false, false)` and the existing `{ ok:false, reason, status?, detail? }`. An empty reply stays `reason:'empty'` and records false. `list_models` unchanged. |
+| F8 | **Admin UI.** Each provider card gets a "Fallback model (optional)" input sharing the card's model datalist; Save calls `set_ai_provider` then `set_ai_fallback_model` (blank clears). Pills: "Tested OK · {time}" when `last_test_ok` and not busy, "Accepted, provider busy · {time}" when `last_test_ok && last_test_busy`, "Not tested" otherwise. Test messages: success "Works. Sample: … (model: {model_used}{, fallback used})"; busy "Your key and model are accepted, but the provider is busy right now. You can enable AI; requests retry automatically." Error `save the provider first` maps to "Save the provider first." Everything else from plan 08 and 10 stays. |
+| F9 | **Customer page timing.** `web/src/customer/FeedbackFormView.jsx` client timeout 10 s → 14 s (12 s server deadline plus margin). The failure message and reference code behaviour stay as they are. |
+| F10 | **Tests.** `supabase/tests/rls.sql`: new columns default (`fallback_model` null, `last_test_busy` false); `set_ai_fallback_model` (super ok; business admin and anon `42501`; invalid provider `22023`; blank clears; 101 characters rejected; unknown provider row `22023`); the 2-arg `record_ai_test` no longer exists and the 3-arg one is service-role only, rejects an invalid provider, and stores `last_test_busy` only when `p_ok` is true; `set_ai_provider` with a changed model resets `last_test_busy`; `set_ai_settings(..., true)` succeeds after `record_ai_test(p, true, true)`; `get_ai_settings()` and both runtime RPCs expose `fallback_model` and never a key beyond the existing runtime `api_key`. Existing calls to `record_ai_test(p, true)` keep working through the default. |
+| F11 | **Node checks (slice 02, scratchpad only).** With a mocked `fetch`: 503,503,200 succeeds on call 3; 503 ×3 with a fallback that returns 200 succeeds with `used_fallback: true` and the fallback model name in the request URL; 404 on primary with a fallback uses it; 401 is not retried and does not use the fallback; 429 is not retried; the fallback equal to the primary is not tried again; an aborted signal stops the waiting. |
+| F12 | **Out of scope (later).** Automatic fallback to a different provider (Claude, OpenAI), queuing or caching, per-company models, circuit breakers, showing the model used to customers. |
+
+## Status
+- [x] 01 — Migration and tests (static review only; DB tests NOT RUN, user applies migration)
+- [x] 02 — Helper, both functions, admin UI, customer timeout, SPEC and acceptance evidence (gated while 01 in flight; mock/node checks only, deploy and browser NOT RUN)
+
+## Dependencies and parallel tracks
+| Slice | Prerequisites | Parallel with | Model | Files touched |
+| --- | --- | --- | --- | --- |
+| 01 | none | 02 (contract fixed by F1–F4) | Sonnet | `supabase/migrations/20261125000001_ai_resilience.sql` (new), `supabase/tests/rls.sql` |
+| 02 | none | 01 | Sonnet | `supabase/functions/_shared/providers.js`, `supabase/functions/test-ai/index.ts`, `supabase/functions/generate-review/index.ts`, `web/src/admin/AiSettingsPage.jsx`, `web/src/customer/FeedbackFormView.jsx`, `web/src/styles.css` (appended `air-` block), `SPEC.md`, `docs/plans/11-ai-resilience/RESULT.md` |
+
+Disjoint files, so they run in parallel. Apply order for you: the migration, then deploy both functions, then use `/admin/ai`.
+
+**Rules for every slice:** read `CLAUDE.md` and `.ai/ENGINEERING_RULES.md` first; implement only the slice scope; no commits; no real keys anywhere; `cd web && npm run build` must pass for web slices; SQL and Edge Functions are statically reviewed, the pure logic is checked with `node` and a mocked `fetch` (scratchpad scripts only); report database, Deno and provider checks NOT RUN; append `## Result` to the slice file. Build on the current contents of every file listed, which several earlier plans edited today.
+
+## Acceptance checklist
+- [ ] After the migration, `rls.sql` prints `ALL RLS TESTS PASSED`.
+- [ ] With Gemini returning 503 on every call, Test retries and then reports "key and model are accepted, but the provider is busy", the card shows "Accepted, provider busy", and AI can be enabled.
+- [ ] With a fallback model saved, a customer generation succeeds when the primary keeps returning 503 and the fallback answers.
+- [ ] A short spike (503 then 200) is hidden from the customer by the retries.
+- [ ] A wrong key or model still fails Test, still cannot be enabled, and still switches the button off during customer use.
+- [ ] A customer who waits sees the result or the friendly failure within about 14 seconds.
+- [x] `SPEC.md` describes retries, the fallback model and the busy state.

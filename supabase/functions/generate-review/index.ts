@@ -2,7 +2,7 @@
 // Called by the public feedback page with the anon key. The service-role client is used
 // only for the runtime RPCs; the key and the prompt are never logged or returned.
 import { createClient } from "npm:@supabase/supabase-js@2";
-import { generateWithRetry } from "../_shared/providers.js";
+import { generateResilient } from "../_shared/providers.js";
 import { buildPrompt, sanitizeReview } from "../_shared/prompt.js";
 
 const cors = {
@@ -14,7 +14,7 @@ const json = (body, status = 200) =>
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const MAX_BODY = 4096;
-const TIMEOUT_MS = 8000;
+const TIMEOUT_MS = 12000;
 
 // Best-effort failure log (plan 09, H4). Never throws, never changes the response, 1 s cap.
 // Only step, provider, model, error kind, HTTP status and the already-redacted detail are passed.
@@ -97,18 +97,21 @@ Deno.serve(async (req) => {
     return json({ error: "ai_unavailable" }, 503);
   }
 
-  // 4. Provider call with an 8 s timeout, then sanitize.
+  // 4. Provider call (retries and optional fallback model) inside a 12 s deadline, then sanitize.
   const { system, user } = buildPrompt({ ...ctx, rating });
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), TIMEOUT_MS);
   try {
-    const text = await generateWithRetry({
+    const { text } = await generateResilient({
       provider: runtime.provider,
       model: runtime.model,
       base_url: runtime.base_url,
       api_key: runtime.api_key,
       system,
       user,
+      fallback_model: runtime.fallback_model,
+      attempts: 3,
+      delaysMs: [600, 1500],
       signal: controller.signal,
     });
     const review = sanitizeReview(text);
@@ -123,7 +126,7 @@ Deno.serve(async (req) => {
     await logError(admin, {
       stage: "provider",
       provider: runtime.provider,
-      model: runtime.model,
+      model: e?.model ?? runtime.model,
       kind: e?.kind ?? "unknown",
       status: e?.status ?? null,
       detail: e?.detail ?? null,

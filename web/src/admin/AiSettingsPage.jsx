@@ -47,6 +47,7 @@ function rpcError(e) {
   const m = errorMessage(e);
   if (m === 'forbidden') return 'Only a Super Admin can change this.';
   if (m.includes('provider not tested')) return 'Run Test successfully first.';
+  if (m.includes('save the provider first')) return 'Save the provider first.';
   if (m.includes('provider has no key')) return 'Save a key for this provider first.';
   if (m.includes('invalid base url')) return 'Use a public https address (no localhost, IP addresses or internal hosts).';
   return m;
@@ -54,6 +55,7 @@ function rpcError(e) {
 
 function ProviderCard({ meta, row, onChanged }) {
   const [model, setModel] = useState(row?.model ?? '');
+  const [fallback, setFallback] = useState(row?.fallback_model ?? '');
   const [baseUrl, setBaseUrl] = useState(row?.base_url ?? '');
   const [key, setKey] = useState('');
   const [busy, setBusy] = useState(false);
@@ -63,6 +65,7 @@ function ProviderCard({ meta, row, onChanged }) {
   const [modelsNote, setModelsNote] = useState(null); // { ok, text }
   const hasKey = !!row?.has_key;
   const tested = hasKey && !!row?.last_test_ok;
+  const acceptedBusy = tested && !!row?.last_test_busy;
   const testedAt = tested && row?.last_tested_at ? new Date(row.last_tested_at).toLocaleString() : '';
 
   async function save(e) {
@@ -76,6 +79,7 @@ function ProviderCard({ meta, row, onChanged }) {
         p_base_url: meta.url ? baseUrl.trim() || null : null,
         p_api_key: key || null,
       }));
+      await must(supabase.rpc('set_ai_fallback_model', { p_provider: meta.id, p_model: fallback.trim() || null }));
       setKey('');
       setMsg({ ok: true, text: 'Saved.' });
       onChanged();
@@ -91,7 +95,8 @@ function ProviderCard({ meta, row, onChanged }) {
     try {
       const { data, error } = await supabase.functions.invoke('test-ai', { body: { provider: meta.id } });
       if (error) setMsg({ ok: false, text: invokeError(error) });
-      else if (data?.ok) setMsg({ ok: true, text: `Works. Sample: ${data.sample}` });
+      else if (data?.busy) setMsg({ ok: true, text: 'Your key and model are accepted, but the provider is busy right now. You can enable AI; requests retry automatically.' });
+      else if (data?.ok) setMsg({ ok: true, text: `Works. Sample: ${data.sample}${data.model_used ? ` (model: ${data.model_used}${data.used_fallback ? ', fallback used' : ''})` : ''}` });
       else setMsg({ ok: false, text: failText(data) });
     } catch {
       setMsg({ ok: false, text: 'Test failed.' });
@@ -124,7 +129,7 @@ function ProviderCard({ meta, row, onChanged }) {
         <h2 className="ai-title">{meta.name}</h2>
         <span className="aig-pills">
           <span className={`pill${hasKey ? '' : ' off'}`}>{hasKey ? 'Key saved' : 'No key'}</span>
-          {hasKey && <span className={`pill${tested ? '' : ' off'}`}>{tested ? `Tested OK${testedAt ? ` · ${testedAt}` : ''}` : 'Not tested'}</span>}
+          {hasKey && <span className={`pill${tested ? '' : ' off'}`}>{tested ? `${acceptedBusy ? 'Accepted, provider busy' : 'Tested OK'}${testedAt ? ` · ${testedAt}` : ''}` : 'Not tested'}</span>}
         </span>
       </div>
       <Field label="Model" hint={modelsNote?.text}>
@@ -132,6 +137,9 @@ function ProviderCard({ meta, row, onChanged }) {
         <datalist id={`models-${meta.id}`}>
           {models.map((m) => <option key={m} value={m} />)}
         </datalist>
+      </Field>
+      <Field label="Fallback model (optional)">
+        <input className="input" value={fallback} maxLength={100} placeholder="Another model to try if the first is busy" list={`models-${meta.id}`} onChange={(e) => setFallback(e.target.value)} />
       </Field>
       {meta.url && (
         <Field label={meta.url === 'required' ? 'Base URL' : 'Base URL (optional)'}>
@@ -293,10 +301,10 @@ export default function AiSettingsPage() {
       {s.error && <ErrorState message={s.error} onRetry={s.reload} />}
       {d && (
         <div className="ai-grid">
-          <GlobalSettings key={stamp + d.providers?.map((r) => `${r.provider}${r.has_key}${r.last_test_ok}`).join()} data={d} onChanged={s.reload} />
+          <GlobalSettings key={stamp + d.providers?.map((r) => `${r.provider}${r.has_key}${r.last_test_ok}${r.last_test_busy}`).join()} data={d} onChanged={s.reload} />
           {PROVIDERS.map((p) => {
             const row = d.providers?.find((r) => r.provider === p.id);
-            return <ProviderCard key={`${p.id}${row?.updated_at ?? ''}${row?.has_key ?? ''}`} meta={p} row={row} onChanged={s.reload} />;
+            return <ProviderCard key={`${p.id}${row?.updated_at ?? ''}${row?.has_key ?? ''}${row?.fallback_model ?? ''}`} meta={p} row={row} onChanged={s.reload} />;
           })}
         </div>
       )}

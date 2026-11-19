@@ -1247,7 +1247,7 @@ do $$ begin
   begin perform set_ai_settings('gemini', true);
     raise exception 'FAIL enable untested gemini'; exception when sqlstate '22023' then
       assert sqlerrm = 'provider not tested', 'not tested message, got ' || sqlerrm; end;
-  assert (select is_enabled from ai_settings) = false, 'rejected enable changed nothing';
+  assert (get_ai_settings()->'is_enabled') = 'false'::jsonb, 'rejected enable changed nothing';
 end $$;
 reset role;
 set role service_role;
@@ -1273,9 +1273,9 @@ reset role;
 select pg_temp.as_user('00000000-0000-0000-0000-0000000000a1', 'authenticated');
 do $$ begin
   perform set_ai_settings('custom', true);
-  assert (select active_provider from ai_settings) = 'custom', 'switched to the tested provider';
+  assert (get_ai_settings()->>'active_provider') = 'custom', 'switched to the tested provider';
   perform set_ai_settings('gemini', true);
-  assert (select active_provider from ai_settings) = 'gemini', 'switched back';
+  assert (get_ai_settings()->>'active_provider') = 'gemini', 'switched back';
 end $$;
 reset role;
 
@@ -1329,6 +1329,261 @@ begin
   assert position('test-key' in s::text) = 0, 'settings output has no key';
   assert not exists (select 1 from jsonb_array_elements(s->'providers') e where e ? 'secret_id' or e ? 'api_key'),
     'no secret fields';
+end $$;
+reset role;
+
+\echo '--- ai resilience: new columns default; record_ai_test is 3-arg only and service-role only'
+do $$ begin
+  assert (select column_default from information_schema.columns
+          where table_schema = 'public' and table_name = 'ai_providers' and column_name = 'last_test_busy') = 'false',
+    'last_test_busy defaults to false';
+  assert (select is_nullable from information_schema.columns
+          where table_schema = 'public' and table_name = 'ai_providers' and column_name = 'fallback_model') = 'YES',
+    'fallback_model is nullable';
+  assert (select fallback_model from ai_providers where provider = 'openai') is null, 'fallback_model defaults to null';
+  assert (select last_test_busy from ai_providers where provider = 'openai') = false, 'last_test_busy defaults to false';
+  assert not exists (select 1 from pg_proc where proname = 'record_ai_test' and pronargs = 2),
+    'the 2-arg record_ai_test is gone';
+  assert (select count(*) from pg_proc where proname = 'record_ai_test' and pronargs = 3) = 1,
+    'exactly one 3-arg record_ai_test';
+end $$;
+create function pg_temp.check_ai_test3_closed(u text, r text) returns void language plpgsql as $$
+begin
+  perform set_config('request.jwt.claim.sub', u, true);
+  execute format('set local role %I', r);
+  begin perform public.record_ai_test('gemini', true, true); raise exception 'FAIL % record_ai_test 3-arg', r;
+  exception when insufficient_privilege then null; end;
+  reset role;
+end $$;
+select pg_temp.check_ai_test3_closed('', 'anon');
+select pg_temp.check_ai_test3_closed('00000000-0000-0000-0000-0000000000a1', 'authenticated');
+select pg_temp.check_ai_test3_closed('00000000-0000-0000-0000-0000000000b1', 'authenticated');
+
+\echo '--- record_ai_test busy flag: stored only with a pass; invalid provider rejected'
+set role service_role;
+select record_ai_test('gemini', true, true);
+reset role;
+do $$ begin
+  assert (select last_test_ok from ai_providers where provider = 'gemini') = true, 'busy pass is ok';
+  assert (select last_test_busy from ai_providers where provider = 'gemini') = true, 'busy flag stored with a pass';
+end $$;
+set role service_role;
+select record_ai_test('gemini', false, true);
+reset role;
+do $$ begin
+  assert (select last_test_ok from ai_providers where provider = 'gemini') = false, 'failure recorded';
+  assert (select last_test_busy from ai_providers where provider = 'gemini') = false, 'busy ignored on a failure';
+end $$;
+set role service_role;
+select record_ai_test('gemini', null, true);
+reset role;
+do $$ begin
+  assert (select last_test_busy from ai_providers where provider = 'gemini') = false, 'busy ignored on a null result';
+end $$;
+set role service_role;
+select record_ai_test('gemini', true, null);
+reset role;
+do $$ begin
+  assert (select last_test_ok from ai_providers where provider = 'gemini') = true
+     and (select last_test_busy from ai_providers where provider = 'gemini') = false, 'null busy = false';
+end $$;
+set role service_role;
+select record_ai_test('gemini', true, true);
+select record_ai_test('gemini', true);
+reset role;
+do $$ begin
+  assert (select last_test_busy from ai_providers where provider = 'gemini') = false, '2-arg call clears busy via the default';
+end $$;
+set role service_role;
+do $$ begin
+  begin perform record_ai_test('bogus', true, true);
+    raise exception 'FAIL bogus provider'; exception when sqlstate '22023' then null; end;
+  begin perform record_ai_test(null, true, false);
+    raise exception 'FAIL null provider'; exception when sqlstate '22023' then null; end;
+end $$;
+reset role;
+
+\echo '--- busy flag resets: changed model, new key and cleared key; a no-op save keeps it'
+set role service_role;
+select record_ai_test('gemini', true, true);
+select record_ai_test('custom', true, true);
+reset role;
+select pg_temp.as_user('00000000-0000-0000-0000-0000000000a1', 'authenticated');
+do $$ begin
+  perform set_ai_provider('gemini', 'gemini-2.5-pro', null, null);
+end $$;
+reset role;
+do $$ begin
+  assert (select last_test_busy from ai_providers where provider = 'gemini') = true, 'no-op save keeps busy';
+end $$;
+select pg_temp.as_user('00000000-0000-0000-0000-0000000000a1', 'authenticated');
+do $$ begin
+  perform set_ai_provider('gemini', 'gemini-2.5-flash', null, null);
+end $$;
+reset role;
+do $$ begin
+  assert (select last_test_busy from ai_providers where provider = 'gemini') = false, 'model change resets busy';
+  assert (select last_test_ok from ai_providers where provider = 'gemini') = false, 'model change resets ok';
+end $$;
+set role service_role;
+select record_ai_test('gemini', true, true);
+reset role;
+select pg_temp.as_user('00000000-0000-0000-0000-0000000000a1', 'authenticated');
+do $$ begin
+  perform set_ai_provider('gemini', 'gemini-2.5-flash', null, 'test-key-1234');
+end $$;
+reset role;
+do $$ begin
+  assert (select last_test_busy from ai_providers where provider = 'gemini') = false, 'new key resets busy';
+end $$;
+select pg_temp.as_user('00000000-0000-0000-0000-0000000000a1', 'authenticated');
+do $$ begin
+  perform clear_ai_provider_key('custom');
+end $$;
+reset role;
+do $$ begin
+  assert (select last_test_busy from ai_providers where provider = 'custom') = false, 'clearing the key resets busy';
+  assert (select last_test_ok from ai_providers where provider = 'custom') = false, 'clearing the key resets ok';
+end $$;
+-- restore a keyed custom provider for later sections
+select pg_temp.as_user('00000000-0000-0000-0000-0000000000a1', 'authenticated');
+do $$ begin
+  perform set_ai_provider('custom', 'my-model', 'https://api.example.org/v1', 'test-key-9999');
+end $$;
+reset role;
+
+\echo '--- set_ai_settings: enabling works after a busy pass (busy is still a pass)'
+set role service_role;
+select record_ai_test('gemini', true, true);
+reset role;
+select pg_temp.as_user('00000000-0000-0000-0000-0000000000a1', 'authenticated');
+do $$ begin
+  perform set_ai_settings('gemini', true);
+  assert get_ai_settings()->'is_enabled' = 'true'::jsonb, 'enabled after a busy pass';
+end $$;
+reset role;
+set role anon;
+do $$ begin
+  assert get_feedback_form('brew1')->'ai_enabled' = 'true'::jsonb, 'busy pass still counts as tested';
+end $$;
+reset role;
+select pg_temp.as_user('00000000-0000-0000-0000-0000000000a1', 'authenticated');
+do $$ begin
+  perform set_ai_settings('gemini', false);
+end $$;
+reset role;
+
+\echo '--- set_ai_fallback_model: super admin only, validation, blank clears, needs a saved provider, keeps the test'
+create function pg_temp.check_fallback_forbidden(u text, r text) returns void language plpgsql as $$
+begin
+  perform set_config('request.jwt.claim.sub', u, true);
+  execute format('set local role %I', r);
+  begin perform public.set_ai_fallback_model('gemini', 'gemini-2.0-flash'); raise exception 'FAIL % set_ai_fallback_model', r;
+  exception when sqlstate '42501' then null; end;
+  reset role;
+end $$;
+select pg_temp.check_fallback_forbidden('', 'anon');
+select pg_temp.check_fallback_forbidden('00000000-0000-0000-0000-0000000000b1', 'authenticated');
+do $$ begin
+  assert (select fallback_model from ai_providers where provider = 'gemini') is null, 'forbidden calls changed nothing';
+end $$;
+set role service_role;
+select record_ai_test('gemini', true, true);
+reset role;
+select pg_temp.as_user('00000000-0000-0000-0000-0000000000a1', 'authenticated');
+do $$ begin
+  perform set_ai_fallback_model('gemini', '  gemini-2.0-flash  ');
+end $$;
+reset role;
+do $$ begin
+  assert (select fallback_model from ai_providers where provider = 'gemini') = 'gemini-2.0-flash', 'trimmed and stored';
+  assert (select last_test_ok from ai_providers where provider = 'gemini') = true, 'fallback change keeps ok';
+  assert (select last_test_busy from ai_providers where provider = 'gemini') = true, 'fallback change keeps busy';
+  assert (select last_tested_at from ai_providers where provider = 'gemini') is not null, 'fallback change keeps the time';
+end $$;
+select pg_temp.as_user('00000000-0000-0000-0000-0000000000a1', 'authenticated');
+do $$ begin
+  begin perform set_ai_fallback_model('bogus', 'x');
+    raise exception 'FAIL bogus provider'; exception when sqlstate '22023' then null; end;
+  begin perform set_ai_fallback_model(null, 'x');
+    raise exception 'FAIL null provider'; exception when sqlstate '22023' then null; end;
+  begin perform set_ai_fallback_model('gemini', repeat('m', 101));
+    raise exception 'FAIL 101 characters'; exception when sqlstate '22023' then null; end;
+  begin perform set_ai_fallback_model('anthropic', 'claude-x');
+    raise exception 'FAIL unsaved provider'; exception when sqlstate '22023' then
+      assert sqlerrm = 'save the provider first', 'unsaved provider message, got ' || sqlerrm; end;
+  perform set_ai_fallback_model('gemini', repeat('m', 100));
+end $$;
+reset role;
+do $$ begin
+  assert char_length((select fallback_model from ai_providers where provider = 'gemini')) = 100, '100 characters accepted';
+end $$;
+select pg_temp.as_user('00000000-0000-0000-0000-0000000000a1', 'authenticated');
+do $$ begin
+  perform set_ai_fallback_model('gemini', 'gemini-2.0-flash');
+end $$;
+reset role;
+do $$ begin
+  assert (select fallback_model from ai_providers where provider = 'gemini') = 'gemini-2.0-flash', 'rejected calls changed nothing';
+  assert not exists (select 1 from ai_providers where provider = 'anthropic'), 'no row created for an unsaved provider';
+end $$;
+
+\echo '--- fallback_model in the read RPCs; blank or null clears it; no key beyond the runtime api_key'
+select pg_temp.as_user('00000000-0000-0000-0000-0000000000a1', 'authenticated');
+do $$
+declare s jsonb;
+begin
+  s := get_ai_settings();
+  assert (select e->>'fallback_model' from jsonb_array_elements(s->'providers') e where e->>'provider' = 'gemini')
+         = 'gemini-2.0-flash', 'settings expose fallback_model';
+  assert (select e->'fallback_model' from jsonb_array_elements(s->'providers') e where e->>'provider' = 'openai')
+         = 'null'::jsonb, 'unset fallback_model is null';
+  assert (select e->'last_test_busy' from jsonb_array_elements(s->'providers') e where e->>'provider' = 'gemini')
+         = 'true'::jsonb, 'settings expose last_test_busy';
+  assert (select e->'last_test_busy' from jsonb_array_elements(s->'providers') e where e->>'provider' = 'openai')
+         = 'false'::jsonb, 'openai last_test_busy false';
+  assert position('test-key' in s::text) = 0, 'settings output has no key';
+  assert not exists (select 1 from jsonb_array_elements(s->'providers') e where e ? 'secret_id' or e ? 'api_key'),
+    'no secret fields';
+end $$;
+reset role;
+set role service_role;
+do $$
+declare r jsonb;
+begin
+  r := get_ai_provider_runtime('gemini');
+  assert r->>'fallback_model' = 'gemini-2.0-flash', 'provider runtime exposes fallback_model';
+  assert r->>'api_key' = 'test-key-1234', 'provider runtime still has its api_key';
+  assert not (r ? 'secret_id'), 'no secret_id in provider runtime';
+  r := get_ai_provider_runtime('custom');
+  assert r->'fallback_model' = 'null'::jsonb, 'unset fallback_model is null in provider runtime';
+end $$;
+reset role;
+select pg_temp.as_user('00000000-0000-0000-0000-0000000000a1', 'authenticated');
+do $$ begin
+  perform set_ai_settings('gemini', true);
+end $$;
+reset role;
+set role service_role;
+do $$
+declare r jsonb;
+begin
+  r := get_ai_runtime();
+  assert r->>'fallback_model' = 'gemini-2.0-flash', 'runtime exposes fallback_model';
+  assert r->>'api_key' = 'test-key-1234', 'runtime still has its api_key';
+  assert not (r ? 'secret_id'), 'no secret_id in runtime';
+end $$;
+reset role;
+select pg_temp.as_user('00000000-0000-0000-0000-0000000000a1', 'authenticated');
+do $$ begin
+  perform set_ai_settings('gemini', false);
+  perform set_ai_fallback_model('gemini', '   ');
+  assert (select e->'fallback_model' from jsonb_array_elements(get_ai_settings()->'providers') e
+          where e->>'provider' = 'gemini') = 'null'::jsonb, 'blank clears';
+  perform set_ai_fallback_model('gemini', 'gemini-2.0-flash');
+  perform set_ai_fallback_model('gemini', null);
+  assert (select e->'fallback_model' from jsonb_array_elements(get_ai_settings()->'providers') e
+          where e->>'provider' = 'gemini') = 'null'::jsonb, 'null clears';
 end $$;
 reset role;
 

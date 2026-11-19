@@ -1,7 +1,7 @@
 // Sends a fixed sample through one AI provider to check its key and model (plan 06, A8).
 // Super Admin only. Never echoes the key; the provider's error text is returned redacted and truncated (plan 08, G1).
 import { createClient } from "npm:@supabase/supabase-js@2";
-import { generate, listModels } from "../_shared/providers.js";
+import { generateResilient, listModels } from "../_shared/providers.js";
 import { buildPrompt, sanitizeReview } from "../_shared/prompt.js";
 
 const cors = {
@@ -12,7 +12,8 @@ const json = (body, status = 200) =>
   new Response(JSON.stringify(body), { status, headers: { ...cors, "Content-Type": "application/json" } });
 
 const PROVIDERS = ["gemini", "anthropic", "openai", "custom"];
-const TIMEOUT_MS = 8000;
+const TIMEOUT_MS = 22000; // test action (retries + fallback)
+const LIST_TIMEOUT_MS = 8000;
 const SAMPLE = {
   company_name: "Sample Cafe",
   branch_name: "Main",
@@ -23,11 +24,11 @@ const SAMPLE = {
 };
 
 // Best-effort record of the test result (plan 10, T7). Never throws, never changes the response, 1 s cap.
-async function recordTest(admin, provider, ok) {
+async function recordTest(admin, provider, ok, busy) {
   let timer;
   try {
     await Promise.race([
-      admin.rpc("record_ai_test", { p_provider: provider, p_ok: ok }),
+      admin.rpc("record_ai_test", { p_provider: provider, p_ok: ok, p_busy: busy }),
       new Promise((resolve) => { timer = setTimeout(resolve, 1000); }),
     ]);
   } catch { /* recording must never affect the response */ } finally {
@@ -73,10 +74,10 @@ Deno.serve(async (req) => {
     return json(out);
   };
 
-  // 4. Send the sample through the same adapter with an 8 s timeout.
+  // 4. Send the sample through the same adapter with a 22 s deadline (8 s for list_models).
   const { system, user } = buildPrompt(SAMPLE);
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), TIMEOUT_MS);
+  const timer = setTimeout(() => controller.abort(), action === "list_models" ? LIST_TIMEOUT_MS : TIMEOUT_MS);
   try {
     if (action === "list_models") {
       const models = await listModels({
@@ -87,24 +88,37 @@ Deno.serve(async (req) => {
       });
       return json({ ok: true, models });
     }
-    const text = await generate({
+    const { text, model_used, used_fallback } = await generateResilient({
       provider: runtime.provider,
       model: runtime.model,
       base_url: runtime.base_url,
       api_key: runtime.api_key,
       system,
       user,
+      fallback_model: runtime.fallback_model,
+      attempts: 4,
+      delaysMs: [1000, 2000, 3000],
       signal: controller.signal,
     });
     const sample = sanitizeReview(text);
     if (!sample) {
-      await recordTest(admin, provider, false);
+      await recordTest(admin, provider, false, false);
       return json({ ok: false, reason: "empty" });
     }
-    await recordTest(admin, provider, true);
-    return json({ ok: true, sample });
+    await recordTest(admin, provider, true, false);
+    return json({ ok: true, sample, model_used, used_fallback });
   } catch (e) {
-    if (action === "test") await recordTest(admin, provider, false);
+    if (action === "test") {
+      if (e?.kind === "unavailable") {
+        // Provider busy: key and model were accepted.
+        await recordTest(admin, provider, true, true);
+        const out: Record<string, unknown> = { ok: true, busy: true };
+        if (typeof e?.status === "number") out.status = e.status;
+        if (typeof e?.detail === "string" && e.detail !== "") out.detail = e.detail;
+        return json(out);
+      }
+      await recordTest(admin, provider, false, false);
+    }
     return fail(e);
   } finally {
     clearTimeout(timer);

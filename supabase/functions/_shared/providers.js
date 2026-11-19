@@ -138,15 +138,41 @@ const sleep = (ms, signal) => new Promise((resolve) => {
   signal?.addEventListener("abort", done, { once: true });
 });
 
-// Customer path: one retry after a provider 5xx, inside the caller's single deadline.
-export async function generateWithRetry(args) {
-  try {
-    return await generate(args);
-  } catch (e) {
-    if (!(e instanceof ProviderError) || e.kind !== "unavailable" || args.signal?.aborted) throw e;
+// Retries provider 5xx with backoff, then tries an optional fallback model once.
+// One shared signal bounds everything. Returns { text, model_used, used_fallback }.
+export async function generateResilient({ fallback_model, attempts = 1, delaysMs = [], signal, ...args }) {
+  const primary = args.model;
+  let last;
+  for (let i = 0; i < Math.max(1, attempts); i++) {
+    if (i > 0) {
+      await sleep(delaysMs[i - 1] ?? 0, signal);
+      if (signal?.aborted) {
+        const err = new ProviderError("timeout");
+        err.model = primary;
+        throw err;
+      }
+    }
+    try {
+      const text = await generate({ ...args, signal });
+      return { text, model_used: primary, used_fallback: false };
+    } catch (e) {
+      if (!(e instanceof ProviderError)) throw e;
+      e.model = primary;
+      last = e;
+      if (e.kind !== "unavailable") break;
+    }
   }
-  await sleep(400, args.signal);
-  return generate(args);
+  const canFallback = (last.kind === "unavailable" || last.kind === "model") &&
+    typeof fallback_model === "string" && fallback_model !== "" && fallback_model !== primary &&
+    !signal?.aborted;
+  if (!canFallback) throw last;
+  try {
+    const text = await generate({ ...args, model: fallback_model, signal });
+    return { text, model_used: fallback_model, used_fallback: true };
+  } catch (e) {
+    if (e instanceof ProviderError) e.model = fallback_model;
+    throw e;
+  }
 }
 
 export async function listModels({ provider, base_url, api_key, signal }) {
