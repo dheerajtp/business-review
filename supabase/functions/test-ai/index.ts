@@ -36,6 +36,22 @@ async function recordTest(admin, provider, ok, busy) {
   }
 }
 
+// Stores the provider's model list (plan 12, L4). Never throws; true only when the call returned without error. 3 s cap.
+async function syncModels(admin, provider, models) {
+  let timer;
+  try {
+    const res = await Promise.race([
+      admin.rpc("sync_ai_models", { p_provider: provider, p_models: models }),
+      new Promise((resolve) => { timer = setTimeout(() => resolve(null), 3000); }),
+    ]);
+    return !!res && !res.error;
+  } catch {
+    return false;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: cors });
   if (req.method !== "POST") return json({ error: "Method not allowed" }, 405);
@@ -86,7 +102,8 @@ Deno.serve(async (req) => {
         api_key: runtime.api_key,
         signal: controller.signal,
       });
-      return json({ ok: true, models });
+      const stored = await syncModels(admin, provider, models);
+      return json({ ok: true, models, stored });
     }
     const { text, model_used, used_fallback } = await generateResilient({
       provider: runtime.provider,

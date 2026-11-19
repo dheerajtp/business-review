@@ -9,10 +9,10 @@ import { errorMessage } from '../lib/format';
 import { useAsync } from '../lib/useAsync';
 
 const PROVIDERS = [
-  { id: 'gemini', name: 'Gemini', model: 'gemini-2.5-flash' },
-  { id: 'anthropic', name: 'Claude (Anthropic)', model: 'claude-haiku-5-5' },
-  { id: 'openai', name: 'OpenAI (GPT)', model: 'gpt-4o-mini', url: 'optional' },
-  { id: 'custom', name: 'Custom (OpenAI-compatible)', model: 'model name', url: 'required' },
+  { id: 'gemini', name: 'Gemini' },
+  { id: 'anthropic', name: 'Claude (Anthropic)' },
+  { id: 'openai', name: 'OpenAI (GPT)', url: 'optional' },
+  { id: 'custom', name: 'Custom (OpenAI-compatible)', url: 'required' },
 ];
 
 const TEST_REASONS = {
@@ -50,10 +50,23 @@ function rpcError(e) {
   if (m.includes('save the provider first')) return 'Save the provider first.';
   if (m.includes('provider has no key')) return 'Save a key for this provider first.';
   if (m.includes('invalid base url')) return 'Use a public https address (no localhost, IP addresses or internal hosts).';
+  if (m.includes('invalid model id')) return 'Use letters, numbers and . _ : / - only.';
+  if (m.includes('synced models cannot be removed')) return "Loaded models can't be removed; they refresh with Load models.";
+  if (m.includes('model in use')) return 'That model is selected for this provider.';
   return m;
 }
 
-function ProviderCard({ meta, row, onChanged }) {
+// Dropdown options: available models, plus the saved value when it is missing or unavailable.
+function modelOptions(rows, saved) {
+  const opts = rows.filter((r) => r.is_available).map((r) => ({ id: r.model_id, label: r.model_id }));
+  if (saved && !opts.some((o) => o.id === saved)) {
+    const known = rows.some((r) => r.model_id === saved);
+    opts.push({ id: saved, label: `${saved} ${known ? '(unavailable)' : '(not in list)'}` });
+  }
+  return opts;
+}
+
+function ProviderCard({ meta, row, rows, onChanged, onModelsChanged }) {
   const [model, setModel] = useState(row?.model ?? '');
   const [fallback, setFallback] = useState(row?.fallback_model ?? '');
   const [baseUrl, setBaseUrl] = useState(row?.base_url ?? '');
@@ -61,11 +74,14 @@ function ProviderCard({ meta, row, onChanged }) {
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState(null); // { ok, text }
   const [removing, setRemoving] = useState(false);
-  const [models, setModels] = useState([]);
+  const [newModel, setNewModel] = useState('');
   const [modelsNote, setModelsNote] = useState(null); // { ok, text }
   const hasKey = !!row?.has_key;
   const tested = hasKey && !!row?.last_test_ok;
   const acceptedBusy = tested && !!row?.last_test_busy;
+  const modelOpts = modelOptions(rows, model);
+  const fallbackOpts = modelOptions(rows, fallback);
+  const manualSelected = [...new Set([model, fallback])].filter((id) => id && rows.some((r) => r.model_id === id && r.source === 'manual'));
   const testedAt = tested && row?.last_tested_at ? new Date(row.last_tested_at).toLocaleString() : '';
 
   async function save(e) {
@@ -113,12 +129,42 @@ function ProviderCard({ meta, row, onChanged }) {
       const { data, error } = await supabase.functions.invoke('test-ai', { body: { provider: meta.id, action: 'list_models' } });
       if (error) setModelsNote({ ok: false, text: invokeError(error) });
       else if (data?.ok) {
-        const list = Array.isArray(data.models) ? data.models.filter((m) => typeof m === 'string') : [];
-        setModels(list);
-        setModelsNote({ ok: true, text: `${list.length} models available` });
+        const count = Array.isArray(data.models) ? data.models.filter((m) => typeof m === 'string').length : 0;
+        setModelsNote({ ok: data.stored !== false, text: data.stored === false ? "Loaded, but couldn't be saved for next time." : `${count} models loaded` });
+        onModelsChanged();
       } else setModelsNote({ ok: false, text: failText(data) });
     } catch {
       setModelsNote({ ok: false, text: 'Could not load models.' });
+    }
+    setBusy(false);
+  }
+
+  async function addModel() {
+    const id = newModel.trim();
+    if (!id) return;
+    setBusy(true);
+    setMsg(null);
+    try {
+      await must(supabase.rpc('add_ai_model', { p_provider: meta.id, p_model_id: id, p_label: null }));
+      setModel(id);
+      setNewModel('');
+      onModelsChanged();
+    } catch (err) {
+      setMsg({ ok: false, text: rpcError(err) });
+    }
+    setBusy(false);
+  }
+
+  async function removeModel(id) {
+    setBusy(true);
+    setMsg(null);
+    try {
+      await must(supabase.rpc('remove_ai_model', { p_provider: meta.id, p_model_id: id }));
+      if (model === id) setModel('');
+      if (fallback === id) setFallback('');
+      onModelsChanged();
+    } catch (err) {
+      setMsg({ ok: false, text: rpcError(err) });
     }
     setBusy(false);
   }
@@ -133,14 +179,32 @@ function ProviderCard({ meta, row, onChanged }) {
         </span>
       </div>
       <Field label="Model" hint={modelsNote?.text}>
-        <input className="input" value={model} maxLength={100} required placeholder={meta.model} list={`models-${meta.id}`} onChange={(e) => setModel(e.target.value)} />
-        <datalist id={`models-${meta.id}`}>
-          {models.map((m) => <option key={m} value={m} />)}
-        </datalist>
+        <select className="select" value={model} required onChange={(e) => setModel(e.target.value)}>
+          <option value="" disabled>Select a model…</option>
+          {modelOpts.map((o) => <option key={o.id} value={o.id}>{o.label}</option>)}
+        </select>
       </Field>
       <Field label="Fallback model (optional)">
-        <input className="input" value={fallback} maxLength={100} placeholder="Another model to try if the first is busy" list={`models-${meta.id}`} onChange={(e) => setFallback(e.target.value)} />
+        <select className="select" value={fallback} onChange={(e) => setFallback(e.target.value)}>
+          <option value="">None</option>
+          {fallbackOpts.map((o) => <option key={o.id} value={o.id}>{o.label}</option>)}
+        </select>
       </Field>
+      {!rows.some((r) => r.is_available) && <p className="hint">Click Load models to fill this list, or add a model name.</p>}
+      <div className="aim-add">
+        <input
+          className="input"
+          value={newModel}
+          maxLength={100}
+          aria-label="Model name"
+          onChange={(e) => setNewModel(e.target.value)}
+          onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); addModel(); } }}
+        />
+        <button type="button" className="btn" disabled={busy || !newModel.trim()} onClick={addModel}>Add model</button>
+        {manualSelected.map((id) => (
+          <button key={id} type="button" className="btn danger" disabled={busy} onClick={() => removeModel(id)}>Remove {id}</button>
+        ))}
+      </div>
       {meta.url && (
         <Field label={meta.url === 'required' ? 'Base URL' : 'Base URL (optional)'}>
           <input className="input" type="url" value={baseUrl} maxLength={300} required={meta.url === 'required'} placeholder="https://api.openai.com/v1" onChange={(e) => setBaseUrl(e.target.value)} />
@@ -151,7 +215,7 @@ function ProviderCard({ meta, row, onChanged }) {
       </Field>
       {msg && <p className={`alert${msg.ok ? ' ok' : ''}`} role={msg.ok ? 'status' : 'alert'}>{msg.text}</p>}
       <div className="ai-actions">
-        <button type="submit" className="btn primary" disabled={busy}>{busy ? 'Working…' : 'Save'}</button>
+        <button type="submit" className="btn primary" disabled={busy || !model}>{busy ? 'Working…' : 'Save'}</button>
         <button type="button" className="btn" disabled={busy || !hasKey} onClick={test}>Test</button>
         <button type="button" className="btn" disabled={busy || !hasKey} onClick={loadModels}>Load models</button>
         {hasKey && <button type="button" className="btn danger" disabled={busy} onClick={() => setRemoving(true)}>Remove key</button>}
@@ -291,6 +355,8 @@ function ErrorLog() {
 
 export default function AiSettingsPage() {
   const s = useAsync(() => must(supabase.rpc('get_ai_settings')), []);
+  const m = useAsync(() => must(supabase.rpc('list_ai_models')), []);
+  const aiModels = Array.isArray(m.data) ? m.data : [];
   const d = s.data;
   const stamp = d ? JSON.stringify([d.active_provider, d.is_enabled]) : '';
 
@@ -304,7 +370,7 @@ export default function AiSettingsPage() {
           <GlobalSettings key={stamp + d.providers?.map((r) => `${r.provider}${r.has_key}${r.last_test_ok}${r.last_test_busy}`).join()} data={d} onChanged={s.reload} />
           {PROVIDERS.map((p) => {
             const row = d.providers?.find((r) => r.provider === p.id);
-            return <ProviderCard key={`${p.id}${row?.updated_at ?? ''}${row?.has_key ?? ''}${row?.fallback_model ?? ''}`} meta={p} row={row} onChanged={s.reload} />;
+            return <ProviderCard key={`${p.id}${row?.updated_at ?? ''}${row?.has_key ?? ''}${row?.fallback_model ?? ''}`} meta={p} row={row} rows={aiModels.filter((r) => r.provider === p.id)} onChanged={s.reload} onModelsChanged={m.reload} />;
           })}
         </div>
       )}

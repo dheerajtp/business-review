@@ -670,3 +670,7 @@ button.rank-row:hover { background: var(--bg); }
 /* aig- admin AI test gate */
 .aig-pills { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: var(--s2); }
 .aig-hint { overflow-wrap: anywhere; }
+
+/* aim- admin AI models */
+.aim-add { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s2); }
+.aim-add .input { flex: 1 1 160px; min-width: 0; }

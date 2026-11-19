@@ -1689,6 +1689,201 @@ do $$ begin
   assert (select count(*) from ai_error_log) = 0, 'clear_ai_errors deleted every row';
 end $$;
 
+\echo '--- ai_models: table closed to anon and authenticated; sync_ai_models not executable by them'
+create function pg_temp.check_ai_models_closed(u text, r text) returns void language plpgsql as $$
+declare q text;
+begin
+  perform set_config('request.jwt.claim.sub', u, true);
+  execute format('set local role %I', r);
+  foreach q in array array[
+    'select 1 from public.ai_models',
+    'insert into public.ai_models (provider, model_id, source) values (''gemini'', ''test-model-x'', ''manual'')',
+    'update public.ai_models set label = ''x''',
+    'delete from public.ai_models',
+    'select public.sync_ai_models(''gemini'', array[''test-model-a''])'
+  ] loop
+    begin execute q; raise exception 'FAIL % ai_models access: %', r, q;
+    exception when insufficient_privilege then null; end;
+  end loop;
+  reset role;
+end $$;
+select pg_temp.check_ai_models_closed('', 'anon');
+select pg_temp.check_ai_models_closed('00000000-0000-0000-0000-0000000000a1', 'authenticated');
+select pg_temp.check_ai_models_closed('00000000-0000-0000-0000-0000000000b1', 'authenticated');
+
+\echo '--- list/add/remove_ai_model: 42501 for business admin and anon'
+select pg_temp.as_user('00000000-0000-0000-0000-0000000000b1', 'authenticated');
+do $$ begin
+  begin perform list_ai_models();
+    raise exception 'FAIL BA list_ai_models'; exception when sqlstate '42501' then
+      assert sqlerrm = 'forbidden', 'forbidden message, got ' || sqlerrm; end;
+  begin perform add_ai_model('gemini', 'test-model-a');
+    raise exception 'FAIL BA add_ai_model'; exception when sqlstate '42501' then null; end;
+  begin perform remove_ai_model('gemini', 'test-model-a');
+    raise exception 'FAIL BA remove_ai_model'; exception when sqlstate '42501' then null; end;
+end $$;
+reset role;
+select pg_temp.as_user('', 'anon');
+do $$ begin
+  begin perform list_ai_models();
+    raise exception 'FAIL anon list_ai_models'; exception when sqlstate '42501' then null; end;
+  begin perform add_ai_model('gemini', 'test-model-a');
+    raise exception 'FAIL anon add_ai_model'; exception when sqlstate '42501' then null; end;
+  begin perform remove_ai_model('gemini', 'test-model-a');
+    raise exception 'FAIL anon remove_ai_model'; exception when sqlstate '42501' then null; end;
+end $$;
+reset role;
+
+\echo '--- add_ai_model / remove_ai_model / list_ai_models as super admin'
+select pg_temp.as_user('00000000-0000-0000-0000-0000000000a1', 'authenticated');
+do $$
+declare r jsonb;
+begin
+  assert list_ai_models() = '[]'::jsonb, 'empty table lists []';
+  begin perform list_ai_models('bogus');
+    raise exception 'FAIL bogus list provider'; exception when sqlstate '22023' then null; end;
+  begin perform add_ai_model('bogus', 'test-model-a');
+    raise exception 'FAIL bogus add provider'; exception when sqlstate '22023' then null; end;
+  begin perform add_ai_model('gemini', 'bad id!');
+    raise exception 'FAIL bad id'; exception when sqlstate '22023' then
+      assert sqlerrm = 'invalid model id', 'invalid model id message, got ' || sqlerrm; end;
+  begin perform add_ai_model('gemini', repeat('m', 101));
+    raise exception 'FAIL 101 characters'; exception when sqlstate '22023' then null; end;
+  begin perform add_ai_model('gemini', '   ');
+    raise exception 'FAIL blank id'; exception when sqlstate '22023' then null; end;
+  begin perform add_ai_model('gemini', null);
+    raise exception 'FAIL null id'; exception when sqlstate '22023' then null; end;
+  assert list_ai_models() = '[]'::jsonb, 'rejected adds stored nothing';
+
+  perform add_ai_model('gemini', '  test-model-a  ', 'Test A');
+  perform add_ai_model('gemini', 'test-model-a', 'Other label');
+  perform add_ai_model('gemini', repeat('m', 100));
+  r := list_ai_models('gemini');
+  assert jsonb_array_length(r) = 2, 'idempotent add, two rows, got ' || jsonb_array_length(r);
+  assert r @> '[{"provider":"gemini","model_id":"test-model-a","label":"Test A","is_available":true,"source":"manual"}]'::jsonb,
+    'manual row stored, trimmed, label kept';
+  assert jsonb_array_length(list_ai_models('openai')) = 0, 'filter by provider';
+  assert jsonb_array_length(list_ai_models()) = 2, 'unfiltered list';
+  assert (select array_agg(k order by k) from jsonb_object_keys(r->0) k)
+         = array['is_available', 'label', 'model_id', 'provider', 'source'], 'row keys';
+end $$;
+reset role;
+do $$ begin
+  assert (select count(*) from ai_models) = 2, 'two manual rows in the table';
+end $$;
+
+\echo '--- remove_ai_model: manual row deleted; provider row and model in use refused'
+set role service_role;
+select sync_ai_models('gemini', array['test-model-p']);
+reset role;
+select pg_temp.as_user('00000000-0000-0000-0000-0000000000a1', 'authenticated');
+do $$
+declare v_model text;
+begin
+  begin perform remove_ai_model('bogus', 'test-model-a');
+    raise exception 'FAIL bogus remove provider'; exception when sqlstate '22023' then null; end;
+  begin perform remove_ai_model('gemini', 'test-model-p');
+    raise exception 'FAIL provider row removed'; exception when sqlstate '22023' then
+      assert sqlerrm = 'synced models cannot be removed', 'synced message, got ' || sqlerrm; end;
+  perform remove_ai_model('gemini', 'test-model-a');
+  perform remove_ai_model('gemini', 'no-such-model');
+  assert (select count(*) from jsonb_array_elements(list_ai_models('gemini')) e
+          where e->>'model_id' = 'test-model-a') = 0, 'manual row removed';
+
+  -- saved model in use
+  select e->>'model' into v_model from jsonb_array_elements(get_ai_settings()->'providers') e
+    where e->>'provider' = 'gemini';
+  perform add_ai_model('gemini', v_model);
+  begin perform remove_ai_model('gemini', v_model);
+    raise exception 'FAIL saved model removed'; exception when sqlstate '22023' then
+      assert sqlerrm = 'model in use', 'in use message, got ' || sqlerrm; end;
+
+  -- fallback in use
+  perform add_ai_model('gemini', 'test-model-fb');
+  perform set_ai_fallback_model('gemini', 'test-model-fb');
+  begin perform remove_ai_model('gemini', 'test-model-fb');
+    raise exception 'FAIL fallback removed'; exception when sqlstate '22023' then
+      assert sqlerrm = 'model in use', 'fallback in use message, got ' || sqlerrm; end;
+  perform set_ai_fallback_model('gemini', null);
+  perform remove_ai_model('gemini', 'test-model-fb');
+  assert (select count(*) from jsonb_array_elements(list_ai_models('gemini')) e
+          where e->>'model_id' = 'test-model-fb') = 0, 'unused fallback model removed';
+  perform remove_ai_model('gemini', repeat('m', 100));
+end $$;
+reset role;
+do $$ begin
+  assert exists (select 1 from ai_models where provider = 'gemini' and model_id = 'test-model-p' and source = 'provider'),
+    'provider row survived';
+  assert (select count(*) from ai_models where provider = 'gemini') = 2, 'provider row and in-use model remain';
+end $$;
+delete from ai_models;
+
+\echo '--- sync_ai_models: upsert, mark missing unavailable, manual rows kept, manual to provider, skip invalid, cap, count'
+set role service_role;
+do $$
+declare n int;
+begin
+  n := sync_ai_models('gemini', array['test-model-a', ' test-model-b ', 'test-model-a', 'bad id!', '', repeat('m', 101)]);
+  assert n = 2, 'count of stored ids, got ' || n;
+  assert sync_ai_models('openai', null) = 0, 'null list stores nothing';
+  begin perform sync_ai_models('bogus', array['x']);
+    raise exception 'FAIL bogus provider'; exception when sqlstate '22023' then null; end;
+  begin perform sync_ai_models(null, array['x']);
+    raise exception 'FAIL null provider'; exception when sqlstate '22023' then null; end;
+  begin perform sync_ai_models('gemini', (select array_agg('test-model-' || i) from generate_series(1, 501) i));
+    raise exception 'FAIL 501 ids'; exception when sqlstate '22023' then
+      assert sqlerrm = 'too many models', 'too many message, got ' || sqlerrm; end;
+  assert sync_ai_models('openai', (select array_agg('test-model-' || i) from generate_series(1, 500) i)) = 500,
+    '500 ids accepted';
+end $$;
+reset role;
+do $$ begin
+  assert (select count(*) from ai_models where provider = 'gemini') = 2, 'two gemini rows, invalid ids skipped';
+  assert (select count(*) from ai_models where provider = 'gemini' and source = 'provider' and is_available) = 2,
+    'both stored as available provider rows';
+  assert exists (select 1 from ai_models where provider = 'gemini' and model_id = 'test-model-b'), 'ids trimmed';
+  assert (select count(*) from ai_models where provider = 'openai') = 500, 'rejected call stored nothing extra';
+end $$;
+delete from ai_models where provider = 'openai';
+
+-- missing provider rows go unavailable, manual rows untouched, manual becomes provider when listed
+select pg_temp.as_user('00000000-0000-0000-0000-0000000000a1', 'authenticated');
+do $$ begin
+  perform add_ai_model('gemini', 'test-model-m1');
+  perform add_ai_model('gemini', 'test-model-m2');
+end $$;
+reset role;
+set role service_role;
+do $$ begin
+  assert sync_ai_models('gemini', array['test-model-b', 'test-model-m2', 'test-model-c']) = 3, 'second sync count';
+end $$;
+reset role;
+do $$ begin
+  assert (select is_available from ai_models where provider = 'gemini' and model_id = 'test-model-a') = false,
+    'missing provider row marked unavailable';
+  assert (select is_available and source = 'provider' from ai_models where provider = 'gemini' and model_id = 'test-model-b'),
+    'listed provider row stays available';
+  assert (select is_available and source = 'provider' from ai_models where provider = 'gemini' and model_id = 'test-model-c'),
+    'new provider row stored';
+  assert (select is_available and source = 'manual' from ai_models where provider = 'gemini' and model_id = 'test-model-m1'),
+    'unlisted manual row untouched';
+  assert (select source = 'provider' and is_available from ai_models where provider = 'gemini' and model_id = 'test-model-m2'),
+    'listed manual row became provider';
+end $$;
+set role service_role;
+do $$ begin
+  assert sync_ai_models('gemini', array[]::text[]) = 0, 'empty list stores nothing';
+end $$;
+reset role;
+do $$ begin
+  assert not exists (select 1 from ai_models where provider = 'gemini' and source = 'provider' and is_available),
+    'empty list marks every provider row unavailable';
+  assert (select is_available and source = 'manual' from ai_models where provider = 'gemini' and model_id = 'test-model-m1'),
+    'manual row still untouched';
+  assert (select count(*) from ai_models where provider <> 'gemini') = 0, 'other providers untouched';
+end $$;
+delete from ai_models;
+
 \echo '--- user without profile sees nothing'
 select pg_temp.as_user('00000000-0000-0000-0000-00000000dead', 'authenticated');
 do $$ begin
