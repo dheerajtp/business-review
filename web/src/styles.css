@@ -660,3 +660,13 @@ button.rank-row:hover { background: var(--bg); }
 .ai-head { display: flex; align-items: center; justify-content: space-between; gap: var(--s3); }
 .ai-title { margin: 0; font-size: 1.0625rem; }
 .ai-actions { display: flex; flex-wrap: wrap; gap: var(--s2); }
+
+/* aie- admin AI error log */
+.aie-card { display: grid; gap: var(--s3); margin-top: var(--s4); }
+.aie-scroll { overflow-x: auto; }
+.aie-table td { vertical-align: top; }
+.aie-detail { min-width: 220px; overflow-wrap: anywhere; }
+
+/* aig- admin AI test gate */
+.aig-pills { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: var(--s2); }
+.aig-hint { overflow-wrap: anywhere; }

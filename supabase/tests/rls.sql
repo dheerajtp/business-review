@@ -925,9 +925,21 @@ begin
       assert sqlerrm = 'provider has no key', 'no key message, got ' || sqlerrm; end;
   begin perform set_ai_settings(null, true);
     raise exception 'FAIL enable without active provider'; exception when sqlstate '22023' then null; end;
+  begin perform set_ai_settings('gemini', true);
+    raise exception 'FAIL enable untested provider'; exception when sqlstate '22023' then
+      assert sqlerrm = 'provider not tested', 'not tested message, got ' || sqlerrm; end;
+end $$;
+reset role;
+set role service_role;
+select record_ai_test('gemini', true);
+reset role;
+select pg_temp.as_user('00000000-0000-0000-0000-0000000000a1', 'authenticated');
+do $$
+declare s jsonb;
+begin
   perform set_ai_settings('gemini', true);
   s := get_ai_settings();
-  assert s->>'active_provider' = 'gemini' and s->'is_enabled' = 'true'::jsonb, 'enabled with a key';
+  assert s->>'active_provider' = 'gemini' and s->'is_enabled' = 'true'::jsonb, 'enabled with a key and a passed test';
 end $$;
 reset role;
 set role anon;
@@ -1004,6 +1016,9 @@ begin
   assert get_ai_provider_runtime('anthropic') is null, 'unsaved provider = null';
   assert get_ai_provider_runtime('bogus') is null, 'unknown provider = null';
 end $$;
+reset role;
+set role service_role;
+select record_ai_test('gemini', true);
 reset role;
 select pg_temp.as_user('00000000-0000-0000-0000-0000000000a1', 'authenticated');
 do $$ begin
@@ -1103,6 +1118,321 @@ do $$ begin
   assert get_feedback_form('brew1')->'ai_enabled' = 'false'::jsonb, 'disabled = false';
 end $$;
 reset role;
+
+\echo '--- ai test gate: new columns default to untested; record_ai_test closed to anon and authenticated'
+do $$ begin
+  assert (select column_default from information_schema.columns
+          where table_schema = 'public' and table_name = 'ai_providers' and column_name = 'last_test_ok') = 'false',
+    'last_test_ok defaults to false';
+  assert (select is_nullable from information_schema.columns
+          where table_schema = 'public' and table_name = 'ai_providers' and column_name = 'last_tested_at') = 'YES',
+    'last_tested_at is nullable';
+  assert (select last_test_ok from ai_providers where provider = 'openai') = false, 'never tested provider = false';
+  assert (select last_tested_at from ai_providers where provider = 'openai') is null, 'never tested provider has no time';
+  assert (select last_test_ok from ai_providers where provider = 'custom') = false, 'custom starts untested';
+end $$;
+create function pg_temp.check_ai_test_closed(u text, r text) returns void language plpgsql as $$
+begin
+  perform set_config('request.jwt.claim.sub', u, true);
+  execute format('set local role %I', r);
+  begin perform public.record_ai_test('gemini', true); raise exception 'FAIL % record_ai_test', r;
+  exception when insufficient_privilege then null; end;
+  reset role;
+end $$;
+select pg_temp.check_ai_test_closed('', 'anon');
+select pg_temp.check_ai_test_closed('00000000-0000-0000-0000-0000000000a1', 'authenticated');
+select pg_temp.check_ai_test_closed('00000000-0000-0000-0000-0000000000b1', 'authenticated');
+
+\echo '--- record_ai_test: service role records pass/fail, rejects an invalid provider, unknown row is a no-op'
+set role service_role;
+select record_ai_test('gemini', false);
+reset role;
+do $$ begin
+  assert (select last_test_ok from ai_providers where provider = 'gemini') = false, 'failure recorded';
+  assert (select last_tested_at from ai_providers where provider = 'gemini') is not null, 'failure time recorded';
+end $$;
+set role service_role;
+select record_ai_test('gemini', true);
+reset role;
+do $$ begin
+  assert (select last_test_ok from ai_providers where provider = 'gemini') = true, 'pass recorded';
+end $$;
+set role service_role;
+select record_ai_test('gemini', null);
+reset role;
+do $$ begin
+  assert (select last_test_ok from ai_providers where provider = 'gemini') = false, 'null result = false';
+end $$;
+set role service_role;
+do $$ begin
+  begin perform record_ai_test('bogus', true);
+    raise exception 'FAIL bogus provider'; exception when sqlstate '22023' then null; end;
+  begin perform record_ai_test(null, true);
+    raise exception 'FAIL null provider'; exception when sqlstate '22023' then null; end;
+  perform record_ai_test('anthropic', true);
+end $$;
+reset role;
+do $$ begin
+  assert not exists (select 1 from ai_providers where provider = 'anthropic'), 'unknown row = no-op, nothing created';
+end $$;
+
+\echo '--- set_ai_provider resets the test on a changed model, base URL or key; a no-op save keeps it'
+set role service_role;
+select record_ai_test('gemini', true);
+select record_ai_test('custom', true);
+reset role;
+select pg_temp.as_user('00000000-0000-0000-0000-0000000000a1', 'authenticated');
+do $$ begin
+  perform set_ai_provider('gemini', 'gemini-2.5-pro', null, null);
+  perform set_ai_provider('gemini', 'gemini-2.5-pro', '', '');
+  perform set_ai_provider('custom', 'my-model', 'https://api.example.com/v1/', null);
+end $$;
+reset role;
+do $$ begin
+  assert (select last_test_ok from ai_providers where provider = 'gemini') = true, 'no-op save keeps gemini test';
+  assert (select last_tested_at from ai_providers where provider = 'gemini') is not null, 'no-op save keeps gemini time';
+  assert (select last_test_ok from ai_providers where provider = 'custom') = true, 'no-op save keeps custom test';
+end $$;
+select pg_temp.as_user('00000000-0000-0000-0000-0000000000a1', 'authenticated');
+do $$ begin
+  perform set_ai_provider('gemini', 'gemini-2.5-flash', null, null);
+  perform set_ai_provider('custom', 'my-model', 'https://api.example.org/v1', null);
+end $$;
+reset role;
+do $$ begin
+  assert (select last_test_ok from ai_providers where provider = 'gemini') = false, 'model change resets the test';
+  assert (select last_tested_at from ai_providers where provider = 'gemini') is null, 'model change clears the time';
+  assert (select last_test_ok from ai_providers where provider = 'custom') = false, 'base url change resets the test';
+  assert (select last_tested_at from ai_providers where provider = 'custom') is null, 'base url change clears the time';
+end $$;
+set role service_role;
+select record_ai_test('gemini', true);
+reset role;
+select pg_temp.as_user('00000000-0000-0000-0000-0000000000a1', 'authenticated');
+do $$ begin
+  perform set_ai_provider('gemini', 'gemini-2.5-flash', null, 'test-key-4321');
+end $$;
+reset role;
+do $$ begin
+  assert (select last_test_ok from ai_providers where provider = 'gemini') = false, 'new key resets the test';
+  assert (select last_tested_at from ai_providers where provider = 'gemini') is null, 'new key clears the time';
+end $$;
+
+\echo '--- clear_ai_provider_key resets the test'
+set role service_role;
+select record_ai_test('gemini', true);
+reset role;
+select pg_temp.as_user('00000000-0000-0000-0000-0000000000a1', 'authenticated');
+do $$ begin
+  perform clear_ai_provider_key('gemini');
+end $$;
+reset role;
+do $$ begin
+  assert (select last_test_ok from ai_providers where provider = 'gemini') = false, 'clearing the key resets the test';
+  assert (select last_tested_at from ai_providers where provider = 'gemini') is null, 'clearing the key clears the time';
+end $$;
+-- a fresh gemini key, saved but untested
+select pg_temp.as_user('00000000-0000-0000-0000-0000000000a1', 'authenticated');
+do $$ begin
+  perform set_ai_provider('gemini', 'gemini-2.5-pro', null, 'test-key-1234');
+end $$;
+reset role;
+
+\echo '--- set_ai_settings: enabling needs a passed test; switching the active provider follows the same rule'
+select pg_temp.as_user('00000000-0000-0000-0000-0000000000a1', 'authenticated');
+do $$ begin
+  begin perform set_ai_settings('openai', true);
+    raise exception 'FAIL enable openai without key'; exception when sqlstate '22023' then
+      assert sqlerrm = 'provider has no key', 'no key message comes first, got ' || sqlerrm; end;
+  begin perform set_ai_settings('gemini', true);
+    raise exception 'FAIL enable untested gemini'; exception when sqlstate '22023' then
+      assert sqlerrm = 'provider not tested', 'not tested message, got ' || sqlerrm; end;
+  assert (select is_enabled from ai_settings) = false, 'rejected enable changed nothing';
+end $$;
+reset role;
+set role service_role;
+select record_ai_test('gemini', true);
+reset role;
+select pg_temp.as_user('00000000-0000-0000-0000-0000000000a1', 'authenticated');
+do $$
+declare s jsonb;
+begin
+  perform set_ai_settings('gemini', true);
+  s := get_ai_settings();
+  assert s->>'active_provider' = 'gemini' and s->'is_enabled' = 'true'::jsonb, 'enabled after a passed test';
+  begin perform set_ai_settings('custom', true);
+    raise exception 'FAIL switch to untested custom'; exception when sqlstate '22023' then
+      assert sqlerrm = 'provider not tested', 'switch not tested message, got ' || sqlerrm; end;
+  s := get_ai_settings();
+  assert s->>'active_provider' = 'gemini' and s->'is_enabled' = 'true'::jsonb, 'rejected switch changed nothing';
+end $$;
+reset role;
+set role service_role;
+select record_ai_test('custom', true);
+reset role;
+select pg_temp.as_user('00000000-0000-0000-0000-0000000000a1', 'authenticated');
+do $$ begin
+  perform set_ai_settings('custom', true);
+  assert (select active_provider from ai_settings) = 'custom', 'switched to the tested provider';
+  perform set_ai_settings('gemini', true);
+  assert (select active_provider from ai_settings) = 'gemini', 'switched back';
+end $$;
+reset role;
+
+\echo '--- get_feedback_form.ai_enabled: needs enabled, a key and a passed test; false again after a failed test'
+set role anon;
+do $$ begin
+  assert get_feedback_form('brew1')->'ai_enabled' = 'true'::jsonb, 'enabled, keyed and tested';
+end $$;
+reset role;
+set role service_role;
+select record_ai_test('gemini', false);
+reset role;
+set role anon;
+do $$ begin
+  assert get_feedback_form('brew1')->'ai_enabled' = 'false'::jsonb, 'recorded failure = false while still enabled';
+end $$;
+reset role;
+set role service_role;
+select record_ai_test('gemini', true);
+reset role;
+set role anon;
+do $$ begin
+  assert get_feedback_form('brew1')->'ai_enabled' = 'true'::jsonb, 'recorded pass = true again';
+end $$;
+reset role;
+select pg_temp.as_user('00000000-0000-0000-0000-0000000000a1', 'authenticated');
+do $$ begin
+  perform set_ai_settings('gemini', false);
+end $$;
+reset role;
+set role anon;
+do $$ begin
+  assert get_feedback_form('brew1')->'ai_enabled' = 'false'::jsonb, 'tested but disabled = false';
+end $$;
+reset role;
+
+\echo '--- get_ai_settings: shows the test fields, still no key or secret id'
+select pg_temp.as_user('00000000-0000-0000-0000-0000000000a1', 'authenticated');
+do $$
+declare s jsonb;
+begin
+  s := get_ai_settings();
+  assert (select e->'last_test_ok' from jsonb_array_elements(s->'providers') e where e->>'provider' = 'gemini')
+         = 'true'::jsonb, 'gemini last_test_ok true';
+  assert (select e->>'last_tested_at' from jsonb_array_elements(s->'providers') e where e->>'provider' = 'gemini')
+         is not null, 'gemini last_tested_at set';
+  assert (select e->'last_test_ok' from jsonb_array_elements(s->'providers') e where e->>'provider' = 'openai')
+         = 'false'::jsonb, 'openai last_test_ok false';
+  assert (select e->'last_tested_at' from jsonb_array_elements(s->'providers') e where e->>'provider' = 'openai')
+         = 'null'::jsonb, 'openai last_tested_at null';
+  assert position('test-key' in s::text) = 0, 'settings output has no key';
+  assert not exists (select 1 from jsonb_array_elements(s->'providers') e where e ? 'secret_id' or e ? 'api_key'),
+    'no secret fields';
+end $$;
+reset role;
+
+\echo '--- ai_error_log: table closed to anon and authenticated; log_ai_error not executable by them'
+create function pg_temp.check_ai_error_closed(u text, r text) returns void language plpgsql as $$
+declare q text;
+begin
+  perform set_config('request.jwt.claim.sub', u, true);
+  execute format('set local role %I', r);
+  foreach q in array array[
+    'select 1 from public.ai_error_log',
+    'insert into public.ai_error_log (stage) values (''runtime'')',
+    'update public.ai_error_log set kind = ''x''',
+    'delete from public.ai_error_log',
+    'select public.log_ai_error(''runtime'', ''gemini'', ''m'', ''k'', 500, ''d'')'
+  ] loop
+    begin execute q; raise exception 'FAIL % ai_error_log access: %', r, q;
+    exception when insufficient_privilege then null; end;
+  end loop;
+  reset role;
+end $$;
+select pg_temp.check_ai_error_closed('', 'anon');
+select pg_temp.check_ai_error_closed('00000000-0000-0000-0000-0000000000a1', 'authenticated');
+select pg_temp.check_ai_error_closed('00000000-0000-0000-0000-0000000000b1', 'authenticated');
+
+\echo '--- log_ai_error: service role writes, rejects a bad stage, truncates long text'
+set role service_role;
+do $$
+declare r record;
+begin
+  perform log_ai_error('provider', repeat('p', 150), repeat('m', 150), repeat('k', 60), 429, repeat('d', 500));
+  perform log_ai_error('empty', null, null, null, null, null);
+  begin perform log_ai_error('bogus', 'gemini', 'm', 'k', 500, 'd');
+    raise exception 'FAIL invalid stage'; exception when sqlstate '22023' then
+      assert sqlerrm = 'invalid stage', 'invalid stage message, got ' || sqlerrm; end;
+  begin perform log_ai_error(null, 'gemini', 'm', 'k', 500, 'd');
+    raise exception 'FAIL null stage'; exception when sqlstate '22023' then null; end;
+end $$;
+reset role;
+do $$ begin
+  assert (select count(*) from ai_error_log) = 2, 'two rows logged, bad stages stored nothing';
+  assert (select char_length(provider) from ai_error_log where stage = 'provider') = 100, 'provider cut to 100';
+  assert (select char_length(model) from ai_error_log where stage = 'provider') = 100, 'model cut to 100';
+  assert (select char_length(kind) from ai_error_log where stage = 'provider') = 30, 'kind cut to 30';
+  assert (select char_length(detail) from ai_error_log where stage = 'provider') = 200, 'detail cut to 200';
+  assert (select status from ai_error_log where stage = 'provider') = 429, 'status stored';
+  assert (select provider is null and model is null and kind is null and status is null and detail is null
+          from ai_error_log where stage = 'empty'), 'nulls stored as null';
+end $$;
+delete from ai_error_log;
+
+\echo '--- log_ai_error: keeps only the newest 200 rows (205 separate calls, row-1 .. row-205)'
+set role service_role;
+select format('select public.log_ai_error(''runtime'', ''gemini'', ''fake-model'', ''fake'', 500, ''row-%s'')', i)
+from generate_series(1, 205) i \gexec
+reset role;
+do $$ begin
+  assert (select count(*) from ai_error_log) = 200, 'capped at 200, got ' || (select count(*) from ai_error_log);
+  assert not exists (select 1 from ai_error_log where detail in ('row-1', 'row-2', 'row-3', 'row-4', 'row-5')), 'oldest 5 gone';
+  assert exists (select 1 from ai_error_log where detail = 'row-6'), 'row-6 kept';
+  assert exists (select 1 from ai_error_log where detail = 'row-205'), 'newest kept';
+end $$;
+
+\echo '--- get_ai_errors / clear_ai_errors: super admin only; newest first; limit clamp'
+select pg_temp.as_user('00000000-0000-0000-0000-0000000000b1', 'authenticated');
+do $$ begin
+  begin perform get_ai_errors();
+    raise exception 'FAIL BA get_ai_errors'; exception when sqlstate '42501' then
+      assert sqlerrm = 'forbidden', 'forbidden message, got ' || sqlerrm; end;
+  begin perform clear_ai_errors();
+    raise exception 'FAIL BA clear_ai_errors'; exception when sqlstate '42501' then
+      assert sqlerrm = 'forbidden', 'forbidden message, got ' || sqlerrm; end;
+end $$;
+reset role;
+select pg_temp.as_user('', 'anon');
+do $$ begin
+  begin perform get_ai_errors();
+    raise exception 'FAIL anon get_ai_errors'; exception when sqlstate '42501' then null; end;
+  begin perform clear_ai_errors();
+    raise exception 'FAIL anon clear_ai_errors'; exception when sqlstate '42501' then null; end;
+end $$;
+reset role;
+select pg_temp.as_user('00000000-0000-0000-0000-0000000000a1', 'authenticated');
+do $$
+declare r jsonb;
+begin
+  r := get_ai_errors(3);
+  assert jsonb_array_length(r) = 3, 'limit 3';
+  assert r->0->>'detail' = 'row-205' and r->1->>'detail' = 'row-204' and r->2->>'detail' = 'row-203',
+    'newest first, got ' || (r->0->>'detail') || ',' || (r->1->>'detail') || ',' || (r->2->>'detail');
+  assert (select array_agg(k order by k) from jsonb_object_keys(r->0) k)
+         = array['created_at', 'detail', 'id', 'kind', 'model', 'provider', 'stage', 'status'], 'row keys';
+  assert jsonb_array_length(get_ai_errors()) = 20, 'default limit 20';
+  assert jsonb_array_length(get_ai_errors(null)) = 20, 'null limit = 20';
+  assert jsonb_array_length(get_ai_errors(0)) = 1, 'limit 0 clamps to 1';
+  assert jsonb_array_length(get_ai_errors(-5)) = 1, 'negative limit clamps to 1';
+  assert jsonb_array_length(get_ai_errors(1000)) = 100, 'limit 1000 clamps to 100';
+  perform clear_ai_errors();
+  assert get_ai_errors() = '[]'::jsonb, 'empty log = []';
+end $$;
+reset role;
+do $$ begin
+  assert (select count(*) from ai_error_log) = 0, 'clear_ai_errors deleted every row';
+end $$;
 
 \echo '--- user without profile sees nothing'
 select pg_temp.as_user('00000000-0000-0000-0000-00000000dead', 'authenticated');

@@ -16,6 +16,40 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const MAX_BODY = 4096;
 const TIMEOUT_MS = 8000;
 
+// Best-effort failure log (plan 09, H4). Never throws, never changes the response, 1 s cap.
+// Only step, provider, model, error kind, HTTP status and the already-redacted detail are passed.
+async function logError(admin, f) {
+  let timer;
+  try {
+    await Promise.race([
+      admin.rpc("log_ai_error", {
+        p_stage: f.stage,
+        p_provider: f.provider ?? null,
+        p_model: f.model ?? null,
+        p_kind: f.kind ?? null,
+        p_status: f.status ?? null,
+        p_detail: f.detail ?? null,
+      }),
+      new Promise((resolve) => { timer = setTimeout(resolve, 1000); }),
+    ]);
+  } catch { /* logging must never affect the customer */ } finally {
+    clearTimeout(timer);
+  }
+}
+
+// Best-effort switch-off when the provider rejects the key or model (plan 10, T8). Never throws, 1 s cap.
+async function recordFailedTest(admin, provider) {
+  let timer;
+  try {
+    await Promise.race([
+      admin.rpc("record_ai_test", { p_provider: provider, p_ok: false }),
+      new Promise((resolve) => { timer = setTimeout(resolve, 1000); }),
+    ]);
+  } catch { /* must never affect the customer */ } finally {
+    clearTimeout(timer);
+  }
+}
+
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: cors });
   if (req.method !== "POST") return json({ error: "method_not_allowed" }, 405);
@@ -46,6 +80,7 @@ Deno.serve(async (req) => {
   if (ctxErr) {
     if (ctxErr.code === "22023") return json({ error: "invalid_keywords" }, 400);
     console.error("generate-review: context_failed");
+    await logError(admin, { stage: "context", kind: ctxErr.code ?? null });
     return json({ error: "server_error" }, 500);
   }
   if (!ctx) return json({ error: "not_found" }, 404);
@@ -54,9 +89,13 @@ Deno.serve(async (req) => {
   const { data: runtime, error: rtErr } = await admin.rpc("get_ai_runtime");
   if (rtErr) {
     console.error("generate-review: runtime_failed");
+    await logError(admin, { stage: "runtime", kind: rtErr.code ?? null });
     return json({ error: "server_error" }, 500);
   }
-  if (!runtime) return json({ error: "ai_unavailable" }, 503);
+  if (!runtime) {
+    await logError(admin, { stage: "not_configured" });
+    return json({ error: "ai_unavailable" }, 503);
+  }
 
   // 4. Provider call with an 8 s timeout, then sanitize.
   const { system, user } = buildPrompt({ ...ctx, rating });
@@ -75,11 +114,21 @@ Deno.serve(async (req) => {
     const review = sanitizeReview(text);
     if (!review) {
       console.warn("generate-review: ai_failed empty");
+      await logError(admin, { stage: "empty", provider: runtime.provider, model: runtime.model });
       return json({ error: "ai_failed" }, 502);
     }
     return json({ review });
   } catch (e) {
     console.warn(`generate-review: ai_failed ${e?.kind ?? "unknown"}`);
+    await logError(admin, {
+      stage: "provider",
+      provider: runtime.provider,
+      model: runtime.model,
+      kind: e?.kind ?? "unknown",
+      status: e?.status ?? null,
+      detail: e?.detail ?? null,
+    });
+    if (e?.kind === "auth" || e?.kind === "model") await recordFailedTest(admin, runtime.provider);
     return json({ error: "ai_failed" }, 502);
   } finally {
     clearTimeout(timer);

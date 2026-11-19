@@ -22,6 +22,19 @@ const SAMPLE = {
   labels: ["friendly staff", "great coffee"],
 };
 
+// Best-effort record of the test result (plan 10, T7). Never throws, never changes the response, 1 s cap.
+async function recordTest(admin, provider, ok) {
+  let timer;
+  try {
+    await Promise.race([
+      admin.rpc("record_ai_test", { p_provider: provider, p_ok: ok }),
+      new Promise((resolve) => { timer = setTimeout(resolve, 1000); }),
+    ]);
+  } catch { /* recording must never affect the response */ } finally {
+    clearTimeout(timer);
+  }
+}
+
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: cors });
   if (req.method !== "POST") return json({ error: "Method not allowed" }, 405);
@@ -84,9 +97,14 @@ Deno.serve(async (req) => {
       signal: controller.signal,
     });
     const sample = sanitizeReview(text);
-    if (!sample) return json({ ok: false, reason: "empty" });
+    if (!sample) {
+      await recordTest(admin, provider, false);
+      return json({ ok: false, reason: "empty" });
+    }
+    await recordTest(admin, provider, true);
     return json({ ok: true, sample });
   } catch (e) {
+    if (action === "test") await recordTest(admin, provider, false);
     return fail(e);
   } finally {
     clearTimeout(timer);

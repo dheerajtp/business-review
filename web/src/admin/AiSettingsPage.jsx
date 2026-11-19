@@ -46,6 +46,7 @@ function invokeError(error) {
 function rpcError(e) {
   const m = errorMessage(e);
   if (m === 'forbidden') return 'Only a Super Admin can change this.';
+  if (m.includes('provider not tested')) return 'Run Test successfully first.';
   if (m.includes('provider has no key')) return 'Save a key for this provider first.';
   if (m.includes('invalid base url')) return 'Use a public https address (no localhost, IP addresses or internal hosts).';
   return m;
@@ -61,6 +62,8 @@ function ProviderCard({ meta, row, onChanged }) {
   const [models, setModels] = useState([]);
   const [modelsNote, setModelsNote] = useState(null); // { ok, text }
   const hasKey = !!row?.has_key;
+  const tested = hasKey && !!row?.last_test_ok;
+  const testedAt = tested && row?.last_tested_at ? new Date(row.last_tested_at).toLocaleString() : '';
 
   async function save(e) {
     e.preventDefault();
@@ -94,6 +97,7 @@ function ProviderCard({ meta, row, onChanged }) {
       setMsg({ ok: false, text: 'Test failed.' });
     }
     setBusy(false);
+    onChanged();
   }
 
   async function loadModels() {
@@ -118,7 +122,10 @@ function ProviderCard({ meta, row, onChanged }) {
     <form className="card ai-card" onSubmit={save}>
       <div className="ai-head">
         <h2 className="ai-title">{meta.name}</h2>
-        <span className={`pill${hasKey ? '' : ' off'}`}>{hasKey ? 'Key saved' : 'No key'}</span>
+        <span className="aig-pills">
+          <span className={`pill${hasKey ? '' : ' off'}`}>{hasKey ? 'Key saved' : 'No key'}</span>
+          {hasKey && <span className={`pill${tested ? '' : ' off'}`}>{tested ? `Tested OK${testedAt ? ` · ${testedAt}` : ''}` : 'Not tested'}</span>}
+        </span>
       </div>
       <Field label="Model" hint={modelsNote?.text}>
         <input className="input" value={model} maxLength={100} required placeholder={meta.model} list={`models-${meta.id}`} onChange={(e) => setModel(e.target.value)} />
@@ -165,6 +172,7 @@ function GlobalSettings({ data, onChanged }) {
   const [msg, setMsg] = useState(null);
   const withKey = PROVIDERS.filter((p) => data.providers?.find((r) => r.provider === p.id)?.has_key);
   const activeHasKey = withKey.some((p) => p.id === active);
+  const activeTested = activeHasKey && !!data.providers?.find((r) => r.provider === active)?.last_test_ok;
 
   async function save(e) {
     e.preventDefault();
@@ -173,7 +181,7 @@ function GlobalSettings({ data, onChanged }) {
     try {
       await must(supabase.rpc('set_ai_settings', {
         p_active_provider: active,
-        p_is_enabled: enabled && activeHasKey,
+        p_is_enabled: enabled && activeTested,
       }));
       setMsg({ ok: true, text: 'Saved.' });
       onChanged();
@@ -194,10 +202,11 @@ function GlobalSettings({ data, onChanged }) {
       </Field>
       <div className="field">
         <label className="check">
-          <input type="checkbox" checked={enabled && activeHasKey} disabled={!activeHasKey} onChange={(e) => setEnabled(e.target.checked)} />
+          <input type="checkbox" checked={enabled && activeTested} disabled={!activeTested} onChange={(e) => setEnabled(e.target.checked)} />
           <span>Enable AI reviews</span>
         </label>
         {!activeHasKey && <span className="hint">Choose a provider that has a saved key to turn this on.</span>}
+        {activeHasKey && !activeTested && <span className="hint aig-hint">Run Test successfully on the active provider first.</span>}
         <span className="hint">Set a spending or quota limit in your AI provider's console.</span>
       </div>
       {msg && <p className={`alert${msg.ok ? ' ok' : ''}`} role={msg.ok ? 'status' : 'alert'}>{msg.text}</p>}
@@ -205,6 +214,70 @@ function GlobalSettings({ data, onChanged }) {
         <button type="submit" className="btn primary" disabled={busy || !active}>{busy ? 'Working…' : 'Save'}</button>
       </div>
     </form>
+  );
+}
+
+const STAGES = {
+  context: 'Loading branch',
+  runtime: 'Loading AI settings',
+  not_configured: 'AI not configured',
+  provider: 'AI provider',
+  empty: 'Empty reply',
+};
+
+// Everything below is rendered as plain text (React escapes it); nothing is HTML.
+function ErrorLog() {
+  const log = useAsync(() => must(supabase.rpc('get_ai_errors', { p_limit: 20 })), []);
+  const [clearing, setClearing] = useState(false);
+  const rows = Array.isArray(log.data) ? log.data : [];
+  const msg = log.error === 'forbidden' ? 'Only a Super Admin can view this.' : log.error;
+
+  return (
+    <section className="card aie-card" aria-label="Recent AI errors">
+      <div className="ai-head">
+        <h2 className="ai-title">Recent AI errors</h2>
+        <div className="ai-actions">
+          <button type="button" className="btn" disabled={log.loading} onClick={log.reload}>Refresh</button>
+          <button type="button" className="btn danger" disabled={log.loading || !rows.length} onClick={() => setClearing(true)}>Clear</button>
+        </div>
+      </div>
+      {msg && <p className="alert" role="alert">{msg}</p>}
+      {!msg && log.loading && !log.data && <p className="hint">Loading…</p>}
+      {!msg && !log.loading && !rows.length && <p className="hint">No errors recorded.</p>}
+      {!msg && rows.length > 0 && (
+        <div className="aie-scroll">
+          <table className="data-table aie-table">
+            <thead>
+              <tr><th>Time</th><th>Step</th><th>Provider / model</th><th>Kind</th><th>HTTP</th><th>Detail</th></tr>
+            </thead>
+            <tbody>
+              {rows.map((r) => (
+                <tr key={r.id}>
+                  <td>{new Date(r.created_at).toLocaleString()}</td>
+                  <td>{STAGES[r.stage] ?? r.stage}</td>
+                  <td>{[r.provider, r.model].filter(Boolean).join(' / ') || '-'}</td>
+                  <td>{r.kind ?? '-'}</td>
+                  <td>{r.status ?? '-'}</td>
+                  <td className="aie-detail">{r.detail ?? '-'}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+      {clearing && (
+        <ConfirmDialog
+          title="Clear the AI error log?"
+          message="All recorded AI errors will be deleted."
+          confirmLabel="Clear"
+          onClose={() => setClearing(false)}
+          onConfirm={async () => {
+            try { await must(supabase.rpc('clear_ai_errors')); } catch (err) { throw new Error(rpcError(err)); }
+            log.reload();
+          }}
+        />
+      )}
+    </section>
   );
 }
 
@@ -220,13 +293,14 @@ export default function AiSettingsPage() {
       {s.error && <ErrorState message={s.error} onRetry={s.reload} />}
       {d && (
         <div className="ai-grid">
-          <GlobalSettings key={stamp + d.providers?.map((r) => `${r.provider}${r.has_key}`).join()} data={d} onChanged={s.reload} />
+          <GlobalSettings key={stamp + d.providers?.map((r) => `${r.provider}${r.has_key}${r.last_test_ok}`).join()} data={d} onChanged={s.reload} />
           {PROVIDERS.map((p) => {
             const row = d.providers?.find((r) => r.provider === p.id);
             return <ProviderCard key={`${p.id}${row?.updated_at ?? ''}${row?.has_key ?? ''}`} meta={p} row={row} onChanged={s.reload} />;
           })}
         </div>
       )}
+      <ErrorLog />
     </>
   );
 }

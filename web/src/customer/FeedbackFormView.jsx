@@ -22,6 +22,17 @@ export default function FeedbackFormView({ form, draft, onDraft, onSubmit, submi
     onDraft(withReview({ ...draft, keywordIds }));
   }
 
+  // Short, harmless reference for a failed call: the function's own error word (e.g. ai_failed)
+  // or the HTTP status (e.g. 401 from the gateway). Never a message body, so nothing sensitive.
+  async function failureCode(err) {
+    const res = err?.context;
+    try {
+      const b = await res.clone().json();
+      if (typeof b?.error === 'string' && /^[a-z_]{1,30}$/.test(b.error)) return b.error;
+    } catch { /* no JSON body */ }
+    return res?.status ? String(res.status) : 'network';
+  }
+
   async function generate() {
     setAi((a) => ({ ...a, loading: true, msg: '' }));
     let timer;
@@ -30,14 +41,18 @@ export default function FeedbackFormView({ form, draft, onDraft, onSubmit, submi
       const timeout = new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('timeout')), 10000); });
       const { data, error: err } = await Promise.race([call, timeout]);
       if (err || typeof data?.review !== 'string' || !data.review.trim()) {
-        setAi((a) => ({ ...a, loading: false, msg: "Couldn't generate right now. You can edit the text below." }));
+        const code = err ? await failureCode(err) : 'empty';
+        console.warn('generate-review failed:', code);
+        setAi((a) => ({ ...a, loading: false, msg: `Couldn't generate right now (ref: ${code}). You can edit the text below.` }));
         return;
       }
       setEdited(true);
       onDraft({ ...draft, comment: data.review.slice(0, 2000) });
       setAi({ loading: false, used: true, msg: '' });
-    } catch {
-      setAi((a) => ({ ...a, loading: false, msg: "Couldn't generate right now. You can edit the text below." }));
+    } catch (e) {
+      const code = e?.message === 'timeout' ? 'timeout' : 'network';
+      console.warn('generate-review failed:', code);
+      setAi((a) => ({ ...a, loading: false, msg: `Couldn't generate right now (ref: ${code}). You can edit the text below.` }));
     } finally {
       clearTimeout(timer);
     }
