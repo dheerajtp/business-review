@@ -6,13 +6,15 @@ export class ProviderError extends Error {
   constructor(kind) {
     super(`provider_${kind}`);
     this.name = "ProviderError";
-    this.kind = kind; // auth | model | network | timeout | unknown
+    this.kind = kind; // auth | model | quota | unavailable | network | timeout | unknown
   }
 }
 
 const statusKind = (status) => {
   if (status === 401 || status === 403) return "auth";
   if (status === 400 || status === 404) return "model";
+  if (status === 429) return "quota";
+  if (status >= 500) return "unavailable";
   return "unknown";
 };
 
@@ -61,7 +63,7 @@ export async function generate({ provider, model, base_url, api_key, system, use
       {
         systemInstruction: { parts: [{ text: system }] },
         contents: [{ role: "user", parts: [{ text: user }] }],
-        generationConfig: { maxOutputTokens: maxTokens, temperature: 0.8 },
+        generationConfig: { maxOutputTokens: Math.max(maxTokens, 1024), temperature: 0.8 },
       },
       signal,
     );

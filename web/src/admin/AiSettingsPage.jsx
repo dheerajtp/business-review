@@ -21,6 +21,9 @@ const TEST_REASONS = {
   model: 'The model name or base URL looks wrong.',
   network: "Couldn't reach the provider.",
   timeout: 'The provider took too long.',
+  quota: "The provider's quota or rate limit was reached. Check billing and limits in the provider's console.",
+  unavailable: 'The provider is temporarily unavailable. Try again in a minute.',
+  empty: 'The provider returned no text. Try a different model.',
 };
 
 function rpcError(e) {
@@ -65,8 +68,16 @@ function ProviderCard({ meta, row, onChanged }) {
     setMsg(null);
     try {
       const { data, error } = await supabase.functions.invoke('test-ai', { body: { provider: meta.id } });
-      if (error) setMsg({ ok: false, text: 'Test failed.' });
-      else if (data?.ok) setMsg({ ok: true, text: `Works. Sample: ${data.sample}` });
+      if (error) {
+        // The call itself failed (not a provider reason). Say why, using only the HTTP status.
+        const status = error.context?.status;
+        const text = status === 404 ? "The test function isn't deployed yet. Run: npx supabase functions deploy test-ai"
+          : status === 401 || status === 403 ? 'Not allowed. Sign in again as Super Admin.'
+          : status === 500 ? "The server couldn't load this provider. Check that the latest database migration is applied."
+          : status ? `Test failed (HTTP ${status}).`
+          : "Couldn't reach the test function. Check your connection and that it is deployed.";
+        setMsg({ ok: false, text });
+      } else if (data?.ok) setMsg({ ok: true, text: `Works. Sample: ${data.sample}` });
       else setMsg({ ok: false, text: TEST_REASONS[data?.reason] ?? 'Test failed.' });
     } catch {
       setMsg({ ok: false, text: 'Test failed.' });

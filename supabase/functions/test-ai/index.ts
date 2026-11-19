@@ -65,10 +65,10 @@ Deno.serve(async (req) => {
       signal: controller.signal,
     });
     const sample = sanitizeReview(text);
-    if (!sample) return json({ ok: false, reason: "unknown" });
+    if (!sample) return json({ ok: false, reason: "empty" });
     return json({ ok: true, sample });
   } catch (e) {
-    const reason = ["auth", "model", "network", "timeout", "unknown"].includes(e?.kind) ? e.kind : "unknown";
+    const reason = ["auth", "model", "quota", "unavailable", "network", "timeout", "unknown"].includes(e?.kind) ? e.kind : "unknown";
     return json({ ok: false, reason });
   } finally {
     clearTimeout(timer);

@@ -8,13 +8,13 @@
 -- =====================================================================================
 
 -- (1) + (2) Rate-limit function and its log table.
-drop function public.log_ai_generation(uuid, text);
-drop table public.ai_generation_log;
+drop function if exists public.log_ai_generation(uuid, text);
+drop table if exists public.ai_generation_log;
 
 -- (3) set_ai_settings without the limit argument.
-drop function public.set_ai_settings(text, boolean, int);
+drop function if exists public.set_ai_settings(text, boolean, int);
 
-create function public.set_ai_settings(
+create or replace function public.set_ai_settings(
   p_active_provider text, p_is_enabled boolean
 ) returns void
 language plpgsql security definer set search_path = public as $$
@@ -45,11 +45,11 @@ revoke all on function public.set_ai_settings(text, boolean) from public, anon, 
 grant execute on function public.set_ai_settings(text, boolean) to authenticated;
 
 -- (4) The column. The getters reference it, so drop them first and recreate them in (5).
-drop function public.get_ai_settings();
-drop function public.get_ai_runtime();
-drop function public.get_ai_provider_runtime(text);
+drop function if exists public.get_ai_settings();
+drop function if exists public.get_ai_runtime();
+drop function if exists public.get_ai_provider_runtime(text);
 
-alter table public.ai_settings drop column daily_limit;
+alter table public.ai_settings drop column if exists daily_limit;
 
 -- (5) Recreate without daily_limit.
 -- Never returns a key or a secret id.
