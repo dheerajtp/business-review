@@ -14,7 +14,8 @@ const json = (body, status = 200) =>
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const MAX_BODY = 4096;
-const TIMEOUT_MS = 12000;
+const TIMEOUT_MS = 16000; // whole operation; each attempt is capped at ATTEMPT_MS
+const ATTEMPT_MS = 5000;
 
 // Best-effort failure log (plan 09, H4). Never throws, never changes the response, 1 s cap.
 // Only step, provider, model, error kind, HTTP status and the already-redacted detail are passed.
@@ -110,8 +111,9 @@ Deno.serve(async (req) => {
       system,
       user,
       fallback_model: runtime.fallback_model,
-      attempts: 3,
-      delaysMs: [600, 1500],
+      attempts: 2,
+      delaysMs: [500],
+      attemptTimeoutMs: ATTEMPT_MS,
       signal: controller.signal,
     });
     const review = sanitizeReview(text);

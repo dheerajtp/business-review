@@ -138,9 +138,33 @@ const sleep = (ms, signal) => new Promise((resolve) => {
   signal?.addEventListener("abort", done, { once: true });
 });
 
-// Retries provider 5xx with backoff, then tries an optional fallback model once.
-// One shared signal bounds everything. Returns { text, model_used, used_fallback }.
-export async function generateResilient({ fallback_model, attempts = 1, delaysMs = [], signal, ...args }) {
+// One provider call with its own time limit. An attempt that gets no answer in time counts as the
+// provider being busy (kind "unavailable"), so it is retried and can fall back; the shared signal
+// still bounds the whole operation (that abort stays kind "timeout").
+async function callOnce(args, signal, attemptTimeoutMs) {
+  if (!(attemptTimeoutMs > 0)) return generate({ ...args, signal });
+  const ac = new AbortController();
+  let attemptTimedOut = false;
+  const onAbort = () => ac.abort();
+  if (signal?.aborted) ac.abort(); else signal?.addEventListener("abort", onAbort, { once: true });
+  const timer = setTimeout(() => { attemptTimedOut = true; ac.abort(); }, attemptTimeoutMs);
+  try {
+    return await generate({ ...args, signal: ac.signal });
+  } catch (e) {
+    if (attemptTimedOut && !signal?.aborted && e instanceof ProviderError && e.kind === "timeout") {
+      throw new ProviderError("unavailable", { detail: `No answer within ${Math.round(attemptTimeoutMs / 1000)} s` });
+    }
+    throw e;
+  } finally {
+    clearTimeout(timer);
+    signal?.removeEventListener("abort", onAbort);
+  }
+}
+
+// Retries provider 5xx (and attempts that get no answer in time) with backoff, then tries an
+// optional fallback model once. One shared signal bounds everything.
+// Returns { text, model_used, used_fallback }.
+export async function generateResilient({ fallback_model, attempts = 1, delaysMs = [], attemptTimeoutMs = 0, signal, ...args }) {
   const primary = args.model;
   let last;
   for (let i = 0; i < Math.max(1, attempts); i++) {
@@ -153,7 +177,7 @@ export async function generateResilient({ fallback_model, attempts = 1, delaysMs
       }
     }
     try {
-      const text = await generate({ ...args, signal });
+      const text = await callOnce(args, signal, attemptTimeoutMs);
       return { text, model_used: primary, used_fallback: false };
     } catch (e) {
       if (!(e instanceof ProviderError)) throw e;
@@ -167,7 +191,7 @@ export async function generateResilient({ fallback_model, attempts = 1, delaysMs
     !signal?.aborted;
   if (!canFallback) throw last;
   try {
-    const text = await generate({ ...args, model: fallback_model, signal });
+    const text = await callOnce({ ...args, model: fallback_model }, signal, attemptTimeoutMs);
     return { text, model_used: fallback_model, used_fallback: true };
   } catch (e) {
     if (e instanceof ProviderError) e.model = fallback_model;

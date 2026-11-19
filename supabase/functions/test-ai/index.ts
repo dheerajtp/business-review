@@ -12,7 +12,8 @@ const json = (body, status = 200) =>
   new Response(JSON.stringify(body), { status, headers: { ...cors, "Content-Type": "application/json" } });
 
 const PROVIDERS = ["gemini", "anthropic", "openai", "custom"];
-const TIMEOUT_MS = 22000; // test action (retries + fallback)
+const TIMEOUT_MS = 45000; // test action (retries + fallback); each attempt is capped at ATTEMPT_MS
+const ATTEMPT_MS = 10000;
 const LIST_TIMEOUT_MS = 8000;
 const SAMPLE = {
   company_name: "Sample Cafe",
@@ -113,8 +114,9 @@ Deno.serve(async (req) => {
       system,
       user,
       fallback_model: runtime.fallback_model,
-      attempts: 4,
-      delaysMs: [1000, 2000, 3000],
+      attempts: 3,
+      delaysMs: [1000, 2000],
+      attemptTimeoutMs: ATTEMPT_MS,
       signal: controller.signal,
     });
     const sample = sanitizeReview(text);

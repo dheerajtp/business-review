@@ -38,7 +38,7 @@ export default function FeedbackFormView({ form, draft, onDraft, onSubmit, submi
     let timer;
     try {
       const call = supabase.functions.invoke('generate-review', { body: { slug, rating: draft.rating, keyword_ids: draft.keywordIds } });
-      const timeout = new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('timeout')), 14000); });
+      const timeout = new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('timeout')), 18000); });
       const { data, error: err } = await Promise.race([call, timeout]);
       if (err || typeof data?.review !== 'string' || !data.review.trim()) {
         const code = err ? await failureCode(err) : 'empty';
