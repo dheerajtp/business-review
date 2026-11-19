@@ -30,8 +30,7 @@ export default function FeedbackFormView({ form, draft, onDraft, onSubmit, submi
       const timeout = new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('timeout')), 10000); });
       const { data, error: err } = await Promise.race([call, timeout]);
       if (err || typeof data?.review !== 'string' || !data.review.trim()) {
-        const msg = err?.context?.status === 429 ? 'Please try again in a few minutes.' : "Couldn't generate right now. You can edit the text below.";
-        setAi((a) => ({ ...a, loading: false, msg }));
+        setAi((a) => ({ ...a, loading: false, msg: "Couldn't generate right now. You can edit the text below." }));
         return;
       }
       setEdited(true);

@@ -16,12 +16,6 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const MAX_BODY = 4096;
 const TIMEOUT_MS = 8000;
 
-async function clientHash(req) {
-  const first = (req.headers.get("x-forwarded-for") ?? "").split(",")[0].trim();
-  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(first));
-  return Array.from(new Uint8Array(digest), (b) => b.toString(16).padStart(2, "0")).join("").slice(0, 32);
-}
-
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: cors });
   if (req.method !== "POST") return json({ error: "method_not_allowed" }, 405);
@@ -64,17 +58,7 @@ Deno.serve(async (req) => {
   }
   if (!runtime) return json({ error: "ai_unavailable" }, 503);
 
-  // 4. Rate limit per branch + client, and the daily cap.
-  const { data: allowed, error: logErr } = await admin.rpc("log_ai_generation", {
-    p_branch_id: ctx.branch_id, p_client_hash: await clientHash(req),
-  });
-  if (logErr) {
-    console.error("generate-review: log_failed");
-    return json({ error: "server_error" }, 500);
-  }
-  if (allowed !== true) return json({ error: "rate_limited" }, 429);
-
-  // 5. Provider call with an 8 s timeout, then sanitize.
+  // 4. Provider call with an 8 s timeout, then sanitize.
   const { system, user } = buildPrompt({ ...ctx, rating });
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), TIMEOUT_MS);

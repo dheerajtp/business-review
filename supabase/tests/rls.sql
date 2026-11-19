@@ -734,11 +734,7 @@ begin
     'select 1 from public.ai_providers',
     'insert into public.ai_providers (provider, model) values (''gemini'', ''x'')',
     'update public.ai_providers set model = ''x''',
-    'delete from public.ai_providers',
-    'select 1 from public.ai_generation_log',
-    'insert into public.ai_generation_log (branch_id, client_hash) values (''30000000-0000-0000-0000-000000000001'', ''x'')',
-    'update public.ai_generation_log set client_hash = ''x''',
-    'delete from public.ai_generation_log'
+    'delete from public.ai_providers'
   ] loop
     begin execute q; raise exception 'FAIL % direct access: %', r, q;
     exception when insufficient_privilege then null; end;
@@ -763,7 +759,7 @@ do $$ begin
   begin perform clear_ai_provider_key('gemini');
     raise exception 'FAIL BA clear_ai_provider_key'; exception when sqlstate '42501' then
       assert sqlerrm = 'forbidden', 'forbidden message, got ' || sqlerrm; end;
-  begin perform set_ai_settings('gemini', false, 100);
+  begin perform set_ai_settings('gemini', false);
     raise exception 'FAIL BA set_ai_settings'; exception when sqlstate '42501' then
       assert sqlerrm = 'forbidden', 'forbidden message, got ' || sqlerrm; end;
   begin perform get_ai_settings();
@@ -777,7 +773,7 @@ do $$ begin
     raise exception 'FAIL anon set_ai_provider'; exception when sqlstate '42501' then null; end;
   begin perform clear_ai_provider_key('gemini');
     raise exception 'FAIL anon clear_ai_provider_key'; exception when sqlstate '42501' then null; end;
-  begin perform set_ai_settings('gemini', false, 100);
+  begin perform set_ai_settings('gemini', false);
     raise exception 'FAIL anon set_ai_settings'; exception when sqlstate '42501' then null; end;
   begin perform get_ai_settings();
     raise exception 'FAIL anon get_ai_settings'; exception when sqlstate '42501' then null; end;
@@ -796,9 +792,9 @@ begin
   s := get_ai_settings();
   assert s->'active_provider' = 'null'::jsonb, 'no active provider by default';
   assert s->'is_enabled' = 'false'::jsonb, 'disabled by default';
-  assert (s->>'daily_limit')::int = 2000, 'default daily limit';
+  assert position('daily_limit' in s::text) = 0, 'no daily_limit in get_ai_settings';
   assert s->'providers' = '[]'::jsonb, 'no providers by default';
-  begin perform set_ai_settings('gemini', true, 2000);
+  begin perform set_ai_settings('gemini', true);
     raise exception 'FAIL enable without provider'; exception when sqlstate '22023' then
       assert sqlerrm = 'provider has no key', 'no key message, got ' || sqlerrm; end;
   -- saved without a key
@@ -806,7 +802,7 @@ begin
   s := get_ai_settings()->'providers'->0;
   assert s->>'provider' = 'gemini' and s->>'model' = 'gemini-2.5-flash', 'provider saved';
   assert s->'has_key' = 'false'::jsonb and s->'key_hint' = 'null'::jsonb, 'no key yet';
-  begin perform set_ai_settings('gemini', true, 2000);
+  begin perform set_ai_settings('gemini', true);
     raise exception 'FAIL enable provider without key'; exception when sqlstate '22023' then
       assert sqlerrm = 'provider has no key', 'no key message, got ' || sqlerrm; end;
   -- first key
@@ -922,20 +918,14 @@ select pg_temp.as_user('00000000-0000-0000-0000-0000000000a1', 'authenticated');
 do $$
 declare s jsonb;
 begin
-  begin perform set_ai_settings('bogus', false, 100);
+  begin perform set_ai_settings('bogus', false);
     raise exception 'FAIL bogus active provider'; exception when sqlstate '22023' then null; end;
-  begin perform set_ai_settings('gemini', false, 0);
-    raise exception 'FAIL daily limit 0'; exception when sqlstate '22023' then null; end;
-  begin perform set_ai_settings('gemini', false, 100001);
-    raise exception 'FAIL daily limit 100001'; exception when sqlstate '22023' then null; end;
-  begin perform set_ai_settings('gemini', false, null);
-    raise exception 'FAIL daily limit null'; exception when sqlstate '22023' then null; end;
-  begin perform set_ai_settings('openai', true, 100);
+  begin perform set_ai_settings('openai', true);
     raise exception 'FAIL enable openai without key'; exception when sqlstate '22023' then
       assert sqlerrm = 'provider has no key', 'no key message, got ' || sqlerrm; end;
-  begin perform set_ai_settings(null, true, 100);
+  begin perform set_ai_settings(null, true);
     raise exception 'FAIL enable without active provider'; exception when sqlstate '22023' then null; end;
-  perform set_ai_settings('gemini', true, 2000);
+  perform set_ai_settings('gemini', true);
   s := get_ai_settings();
   assert s->>'active_provider' = 'gemini' and s->'is_enabled' = 'true'::jsonb, 'enabled with a key';
 end $$;
@@ -986,7 +976,6 @@ begin
     'select public.get_ai_runtime()',
     'select public.get_ai_provider_runtime(''gemini'')',
     'select public.get_review_context(''brew1'', ''{}''::uuid[])',
-    'select public.log_ai_generation(''30000000-0000-0000-0000-000000000001'', ''x'')',
     'select public.ai_valid_base_url(''https://api.example.com'')'
   ] loop
     begin execute q; raise exception 'FAIL % runtime call: %', r, q;
@@ -1007,7 +996,8 @@ begin
   r := get_ai_provider_runtime('gemini');
   assert r->>'provider' = 'gemini' and r->>'model' = 'gemini-2.5-pro', 'gemini runtime';
   assert r->>'api_key' = 'test-key-1234', 'gemini runtime key';
-  assert r->'base_url' = 'null'::jsonb and (r->>'daily_limit')::int = 2000, 'gemini runtime base url and limit';
+  assert r->'base_url' = 'null'::jsonb, 'gemini runtime base url';
+  assert position('daily_limit' in r::text) = 0, 'no daily_limit in get_ai_provider_runtime';
   r := get_ai_provider_runtime('custom');
   assert r->>'api_key' = 'test-key-9999' and r->>'base_url' = 'https://api.example.com/v1', 'custom runtime';
   assert get_ai_provider_runtime('openai') is null, 'provider without a key = null';
@@ -1017,7 +1007,7 @@ end $$;
 reset role;
 select pg_temp.as_user('00000000-0000-0000-0000-0000000000a1', 'authenticated');
 do $$ begin
-  perform set_ai_settings('gemini', true, 2000);
+  perform set_ai_settings('gemini', true);
 end $$;
 reset role;
 set role service_role;
@@ -1026,7 +1016,8 @@ declare r jsonb;
 begin
   r := get_ai_runtime();
   assert r->>'provider' = 'gemini' and r->>'model' = 'gemini-2.5-pro', 'enabled runtime provider';
-  assert r->>'api_key' = 'test-key-1234' and (r->>'daily_limit')::int = 2000, 'enabled runtime key and limit';
+  assert r->>'api_key' = 'test-key-1234', 'enabled runtime key';
+  assert position('daily_limit' in r::text) = 0, 'no daily_limit in get_ai_runtime';
 end $$;
 reset role;
 
@@ -1075,38 +1066,13 @@ end $$;
 reset role;
 update companies set is_active = true where id = '20000000-0000-0000-0000-000000000001';
 
-\echo '--- log_ai_generation: 6 per client per 10 minutes, daily limit, old rows pruned'
-insert into ai_generation_log (branch_id, client_hash, created_at)
-  values ('30000000-0000-0000-0000-000000000001', 'hash-old', now() - interval '8 days');
-set role service_role;
-do $$
-declare i int;
-begin
-  for i in 1..6 loop
-    assert log_ai_generation('30000000-0000-0000-0000-000000000001', 'hash-a'), 'generation ' || i || ' allowed';
-  end loop;
-  assert not log_ai_generation('30000000-0000-0000-0000-000000000001', 'hash-a'), '7th for the same client refused';
-  assert log_ai_generation('30000000-0000-0000-0000-000000000001', 'hash-b'), 'another client allowed';
-end $$;
-reset role;
+\echo '--- ai limits removed: log table and function gone, no daily_limit anywhere'
 do $$ begin
-  assert (select count(*) from ai_generation_log) = 7, 'refused call stored nothing; old row pruned, got '
-    || (select count(*) from ai_generation_log);
-  assert not exists (select 1 from ai_generation_log where client_hash = 'hash-old'), 'rows older than 7 days deleted';
-end $$;
-select pg_temp.as_user('00000000-0000-0000-0000-0000000000a1', 'authenticated');
-do $$ begin
-  perform set_ai_settings('gemini', true, 8);
-end $$;
-reset role;
-set role service_role;
-do $$ begin
-  assert log_ai_generation('30000000-0000-0000-0000-000000000002', 'hash-c'), '8th of the day allowed';
-  assert not log_ai_generation('30000000-0000-0000-0000-000000000002', 'hash-d'), 'daily limit reached';
-end $$;
-reset role;
-do $$ begin
-  assert (select count(*) from ai_generation_log) = 8, 'daily limit refusal stored nothing';
+  assert to_regclass('public.ai_generation_log') is null, 'ai_generation_log table dropped';
+  assert not exists (select 1 from pg_proc where proname = 'log_ai_generation'), 'log_ai_generation dropped';
+  assert not exists (select 1 from information_schema.columns
+    where table_schema = 'public' and table_name = 'ai_settings' and column_name = 'daily_limit'), 'daily_limit column dropped';
+  assert not exists (select 1 from pg_proc where proname = 'set_ai_settings' and pronargs = 3), 'old 3-arg set_ai_settings dropped';
 end $$;
 
 \echo '--- get_feedback_form.ai_enabled: needs enabled + a key on the active provider'
@@ -1129,7 +1095,7 @@ reset role;
 update ai_settings set active_provider = 'gemini';
 select pg_temp.as_user('00000000-0000-0000-0000-0000000000a1', 'authenticated');
 do $$ begin
-  perform set_ai_settings('gemini', false, 2000);
+  perform set_ai_settings('gemini', false);
 end $$;
 reset role;
 set role anon;

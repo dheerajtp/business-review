@@ -1,5 +1,7 @@
 # 06 — AI review generation with a configurable provider and key
 
+Amended by plan 07: AI limits removed.
+
 Master plan: none (`SPEC.md` is updated in slice 05) · Builds on: [`../02-keyword-library/00-README.md`](../02-keyword-library/00-README.md), [`../04-company-keywords/00-README.md`](../04-company-keywords/00-README.md) (the branch's effective keywords)
 
 ## Goal

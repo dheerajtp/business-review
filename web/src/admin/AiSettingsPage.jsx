@@ -117,7 +117,6 @@ function ProviderCard({ meta, row, onChanged }) {
 function GlobalSettings({ data, onChanged }) {
   const [active, setActive] = useState(data.active_provider ?? '');
   const [enabled, setEnabled] = useState(!!data.is_enabled);
-  const [limit, setLimit] = useState(String(data.daily_limit ?? 200));
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState(null);
   const withKey = PROVIDERS.filter((p) => data.providers?.find((r) => r.provider === p.id)?.has_key);
@@ -131,7 +130,6 @@ function GlobalSettings({ data, onChanged }) {
       await must(supabase.rpc('set_ai_settings', {
         p_active_provider: active,
         p_is_enabled: enabled && activeHasKey,
-        p_daily_limit: Number(limit),
       }));
       setMsg({ ok: true, text: 'Saved.' });
       onChanged();
@@ -156,10 +154,8 @@ function GlobalSettings({ data, onChanged }) {
           <span>Enable AI reviews</span>
         </label>
         {!activeHasKey && <span className="hint">Choose a provider that has a saved key to turn this on.</span>}
+        <span className="hint">Set a spending or quota limit in your AI provider's console.</span>
       </div>
-      <Field label="Daily limit" hint="Most AI reviews that can be generated per day, across all customers.">
-        <input className="input" type="number" min={1} max={100000} step={1} required value={limit} onChange={(e) => setLimit(e.target.value)} />
-      </Field>
       {msg && <p className={`alert${msg.ok ? ' ok' : ''}`} role={msg.ok ? 'status' : 'alert'}>{msg.text}</p>}
       <div className="ai-actions">
         <button type="submit" className="btn primary" disabled={busy || !active}>{busy ? 'Working…' : 'Save'}</button>
@@ -171,7 +167,7 @@ function GlobalSettings({ data, onChanged }) {
 export default function AiSettingsPage() {
   const s = useAsync(() => must(supabase.rpc('get_ai_settings')), []);
   const d = s.data;
-  const stamp = d ? JSON.stringify([d.active_provider, d.is_enabled, d.daily_limit]) : '';
+  const stamp = d ? JSON.stringify([d.active_provider, d.is_enabled]) : '';
 
   return (
     <>
