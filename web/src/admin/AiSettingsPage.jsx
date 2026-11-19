@@ -26,6 +26,23 @@ const TEST_REASONS = {
   empty: 'The provider returned no text. Try a different model.',
 };
 
+// Provider status and message are plain text for the Super Admin; never rendered as HTML.
+function failText(data) {
+  const base = TEST_REASONS[data?.reason] ?? 'Test failed.';
+  const extra = [data?.status ? `HTTP ${data.status}` : '', data?.detail ?? ''].filter(Boolean).join(': ');
+  return extra ? `${base} (${extra})` : base;
+}
+
+function invokeError(error) {
+  // The call itself failed (not a provider reason). Say why, using only the HTTP status.
+  const status = error.context?.status;
+  return status === 404 ? "The test function isn't deployed yet. Run: npx supabase functions deploy test-ai"
+    : status === 401 || status === 403 ? 'Not allowed. Sign in again as Super Admin.'
+    : status === 500 ? "The server couldn't load this provider. Check that the latest database migration is applied."
+    : status ? `Test failed (HTTP ${status}).`
+    : "Couldn't reach the test function. Check your connection and that it is deployed.";
+}
+
 function rpcError(e) {
   const m = errorMessage(e);
   if (m === 'forbidden') return 'Only a Super Admin can change this.';
@@ -41,6 +58,8 @@ function ProviderCard({ meta, row, onChanged }) {
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState(null); // { ok, text }
   const [removing, setRemoving] = useState(false);
+  const [models, setModels] = useState([]);
+  const [modelsNote, setModelsNote] = useState(null); // { ok, text }
   const hasKey = !!row?.has_key;
 
   async function save(e) {
@@ -68,19 +87,29 @@ function ProviderCard({ meta, row, onChanged }) {
     setMsg(null);
     try {
       const { data, error } = await supabase.functions.invoke('test-ai', { body: { provider: meta.id } });
-      if (error) {
-        // The call itself failed (not a provider reason). Say why, using only the HTTP status.
-        const status = error.context?.status;
-        const text = status === 404 ? "The test function isn't deployed yet. Run: npx supabase functions deploy test-ai"
-          : status === 401 || status === 403 ? 'Not allowed. Sign in again as Super Admin.'
-          : status === 500 ? "The server couldn't load this provider. Check that the latest database migration is applied."
-          : status ? `Test failed (HTTP ${status}).`
-          : "Couldn't reach the test function. Check your connection and that it is deployed.";
-        setMsg({ ok: false, text });
-      } else if (data?.ok) setMsg({ ok: true, text: `Works. Sample: ${data.sample}` });
-      else setMsg({ ok: false, text: TEST_REASONS[data?.reason] ?? 'Test failed.' });
+      if (error) setMsg({ ok: false, text: invokeError(error) });
+      else if (data?.ok) setMsg({ ok: true, text: `Works. Sample: ${data.sample}` });
+      else setMsg({ ok: false, text: failText(data) });
     } catch {
       setMsg({ ok: false, text: 'Test failed.' });
+    }
+    setBusy(false);
+  }
+
+  async function loadModels() {
+    setBusy(true);
+    setMsg(null);
+    setModelsNote(null);
+    try {
+      const { data, error } = await supabase.functions.invoke('test-ai', { body: { provider: meta.id, action: 'list_models' } });
+      if (error) setModelsNote({ ok: false, text: invokeError(error) });
+      else if (data?.ok) {
+        const list = Array.isArray(data.models) ? data.models.filter((m) => typeof m === 'string') : [];
+        setModels(list);
+        setModelsNote({ ok: true, text: `${list.length} models available` });
+      } else setModelsNote({ ok: false, text: failText(data) });
+    } catch {
+      setModelsNote({ ok: false, text: 'Could not load models.' });
     }
     setBusy(false);
   }
@@ -91,8 +120,11 @@ function ProviderCard({ meta, row, onChanged }) {
         <h2 className="ai-title">{meta.name}</h2>
         <span className={`pill${hasKey ? '' : ' off'}`}>{hasKey ? 'Key saved' : 'No key'}</span>
       </div>
-      <Field label="Model">
-        <input className="input" value={model} maxLength={100} required placeholder={meta.model} onChange={(e) => setModel(e.target.value)} />
+      <Field label="Model" hint={modelsNote?.text}>
+        <input className="input" value={model} maxLength={100} required placeholder={meta.model} list={`models-${meta.id}`} onChange={(e) => setModel(e.target.value)} />
+        <datalist id={`models-${meta.id}`}>
+          {models.map((m) => <option key={m} value={m} />)}
+        </datalist>
       </Field>
       {meta.url && (
         <Field label={meta.url === 'required' ? 'Base URL' : 'Base URL (optional)'}>
@@ -106,6 +138,7 @@ function ProviderCard({ meta, row, onChanged }) {
       <div className="ai-actions">
         <button type="submit" className="btn primary" disabled={busy}>{busy ? 'Working…' : 'Save'}</button>
         <button type="button" className="btn" disabled={busy || !hasKey} onClick={test}>Test</button>
+        <button type="button" className="btn" disabled={busy || !hasKey} onClick={loadModels}>Load models</button>
         {hasKey && <button type="button" className="btn danger" disabled={busy} onClick={() => setRemoving(true)}>Remove key</button>}
       </div>
       {removing && (

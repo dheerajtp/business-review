@@ -2,7 +2,7 @@
 // Called by the public feedback page with the anon key. The service-role client is used
 // only for the runtime RPCs; the key and the prompt are never logged or returned.
 import { createClient } from "npm:@supabase/supabase-js@2";
-import { generate } from "../_shared/providers.js";
+import { generateWithRetry } from "../_shared/providers.js";
 import { buildPrompt, sanitizeReview } from "../_shared/prompt.js";
 
 const cors = {
@@ -63,7 +63,7 @@ Deno.serve(async (req) => {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), TIMEOUT_MS);
   try {
-    const text = await generate({
+    const text = await generateWithRetry({
       provider: runtime.provider,
       model: runtime.model,
       base_url: runtime.base_url,

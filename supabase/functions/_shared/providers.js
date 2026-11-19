@@ -3,10 +3,13 @@
 import { isValidBaseUrl, normalizeBaseUrl } from "./urlGuard.js";
 
 export class ProviderError extends Error {
-  constructor(kind) {
+  constructor(kind, { status, detail } = {}) {
     super(`provider_${kind}`);
     this.name = "ProviderError";
     this.kind = kind; // auth | model | quota | unavailable | network | timeout | unknown
+    // status/detail are for the Super Admin Test only; customer code must never read them.
+    this.status = status;
+    this.detail = detail;
   }
 }
 
@@ -18,28 +21,56 @@ const statusKind = (status) => {
   return "unknown";
 };
 
-async function postJson(url, headers, body, signal) {
+// Collapses whitespace, masks the key and any key= query value, caps at 200 chars.
+function redact(text, key) {
+  let t = String(text ?? "").replace(/\s+/g, " ").trim();
+  if (key) t = t.split(key).join("***");
+  t = t.replace(/([?&]key=)[^&\s"']+/gi, "$1***");
+  return t.slice(0, 200);
+}
+
+async function errorDetail(res, key) {
+  try {
+    const text = (await res.text()).slice(0, 2000);
+    let msg = text;
+    try {
+      const m = JSON.parse(text)?.error?.message;
+      if (typeof m === "string") msg = m;
+    } catch { /* not JSON: use the raw text */ }
+    return redact(msg, key);
+  } catch {
+    return undefined;
+  }
+}
+
+async function request(url, init, signal, key) {
   let res;
   try {
-    res = await fetch(url, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", ...headers },
-      body: JSON.stringify(body),
-      signal,
-      redirect: "error",
-    });
+    res = await fetch(url, { ...init, signal, redirect: "error" });
   } catch (e) {
     throw new ProviderError(e?.name === "AbortError" || signal?.aborted ? "timeout" : "network");
   }
   if (!res.ok) {
-    try { await res.body?.cancel(); } catch { /* ignore */ }
-    throw new ProviderError(statusKind(res.status));
+    const detail = await errorDetail(res, key);
+    throw new ProviderError(statusKind(res.status), { status: res.status, detail });
   }
   try {
     return await res.json();
   } catch (e) {
     throw new ProviderError(e?.name === "AbortError" || signal?.aborted ? "timeout" : "unknown");
   }
+}
+
+function postJson(url, headers, body, signal, key) {
+  return request(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...headers },
+    body: JSON.stringify(body),
+  }, signal, key);
+}
+
+function getJson(url, headers, signal, key) {
+  return request(url, { method: "GET", headers }, signal, key);
 }
 
 function openaiBase(provider, base_url) {
@@ -66,6 +97,7 @@ export async function generate({ provider, model, base_url, api_key, system, use
         generationConfig: { maxOutputTokens: Math.max(maxTokens, 1024), temperature: 0.8 },
       },
       signal,
+      api_key,
     );
     const parts = data?.candidates?.[0]?.content?.parts;
     return Array.isArray(parts) ? parts.map((p) => (typeof p?.text === "string" ? p.text : "")).join("") : "";
@@ -77,6 +109,7 @@ export async function generate({ provider, model, base_url, api_key, system, use
       { "x-api-key": api_key, "anthropic-version": "2023-06-01" },
       { model, max_tokens: maxTokens, system, messages: [{ role: "user", content: user }] },
       signal,
+      api_key,
     );
     const content = data?.content;
     return Array.isArray(content)
@@ -90,10 +123,55 @@ export async function generate({ provider, model, base_url, api_key, system, use
     const body = provider === "openai"
       ? { model, messages, max_completion_tokens: maxTokens }
       : { model, messages, max_tokens: maxTokens, temperature: 0.8 };
-    const data = await postJson(`${base}/chat/completions`, { Authorization: `Bearer ${api_key}` }, body, signal);
+    const data = await postJson(`${base}/chat/completions`, { Authorization: `Bearer ${api_key}` }, body, signal, api_key);
     const text = data?.choices?.[0]?.message?.content;
     return typeof text === "string" ? text : "";
   }
 
   throw new ProviderError("model");
+}
+
+const sleep = (ms, signal) => new Promise((resolve) => {
+  if (signal?.aborted) return resolve();
+  const t = setTimeout(() => { signal?.removeEventListener("abort", done); resolve(); }, ms);
+  function done() { clearTimeout(t); resolve(); }
+  signal?.addEventListener("abort", done, { once: true });
+});
+
+// Customer path: one retry after a provider 5xx, inside the caller's single deadline.
+export async function generateWithRetry(args) {
+  try {
+    return await generate(args);
+  } catch (e) {
+    if (!(e instanceof ProviderError) || e.kind !== "unavailable" || args.signal?.aborted) throw e;
+  }
+  await sleep(400, args.signal);
+  return generate(args);
+}
+
+export async function listModels({ provider, base_url, api_key, signal }) {
+  if (typeof api_key !== "string" || api_key === "") throw new ProviderError("model");
+  let ids;
+  if (provider === "gemini") {
+    const data = await getJson(
+      "https://generativelanguage.googleapis.com/v1beta/models?pageSize=100",
+      { "x-goog-api-key": api_key }, signal, api_key,
+    );
+    ids = (Array.isArray(data?.models) ? data.models : [])
+      .filter((m) => Array.isArray(m?.supportedGenerationMethods) && m.supportedGenerationMethods.includes("generateContent"))
+      .map((m) => (typeof m.name === "string" ? m.name.replace(/^models\//, "") : ""));
+  } else if (provider === "anthropic") {
+    const data = await getJson(
+      "https://api.anthropic.com/v1/models?limit=100",
+      { "x-api-key": api_key, "anthropic-version": "2023-06-01" }, signal, api_key,
+    );
+    ids = (Array.isArray(data?.data) ? data.data : []).map((m) => m?.id);
+  } else if (provider === "openai" || provider === "custom") {
+    const base = openaiBase(provider, base_url);
+    const data = await getJson(`${base}/models`, { Authorization: `Bearer ${api_key}` }, signal, api_key);
+    ids = (Array.isArray(data?.data) ? data.data : []).map((m) => m?.id);
+  } else {
+    throw new ProviderError("model");
+  }
+  return [...new Set(ids.filter((id) => typeof id === "string" && id !== ""))].sort().slice(0, 200);
 }

@@ -19,7 +19,7 @@ Master plan: none (`SPEC.md` gets a short update in the slice) · Builds on and 
 | G7 | **Out of scope (later).** Automatic fallback to a second provider, caching model lists, showing model prices or limits, validating the model before saving, retry on quota (429) errors. |
 
 ## Status
-- [ ] 01 — Provider detail and redaction, list-models, one retry, admin UI, SPEC and acceptance evidence
+- [x] 01 — Provider detail and redaction, list-models, one retry, admin UI, SPEC and acceptance evidence (node/mock checks only; deploy and real-provider checks NOT RUN)
 
 ## Dependencies and parallel tracks
 | Slice | Prerequisites | Parallel with | Model | Files touched |
