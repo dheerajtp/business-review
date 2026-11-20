@@ -52,7 +52,9 @@ async function request(url, init, signal, key) {
   }
   if (!res.ok) {
     const detail = await errorDetail(res, key);
-    throw new ProviderError(statusKind(res.status), { status: res.status, detail });
+    // shortcut: billing refusals arrive as 400/403 with a message; match the redacted detail, upgrade if providers add codes
+    const billing = res.status === 402 || ([400, 403].includes(res.status) && /credit balance|insufficient (credit|funds|quota)|billing|payment required/i.test(detail ?? ""));
+    throw new ProviderError(billing ? "quota" : statusKind(res.status), { status: res.status, detail });
   }
   try {
     return await res.json();

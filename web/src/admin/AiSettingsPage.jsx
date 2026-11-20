@@ -21,7 +21,7 @@ const TEST_REASONS = {
   model: 'The model name or base URL looks wrong.',
   network: "Couldn't reach the provider.",
   timeout: 'The provider took too long.',
-  quota: "The provider's quota or rate limit was reached. Check billing and limits in the provider's console.",
+  quota: "The provider says this account has no credit or has hit its quota or rate limit. Add credit or check limits in the provider's console, or switch provider.",
   unavailable: 'The provider is temporarily unavailable. Try again in a minute.',
   empty: 'The provider returned no text. Try a different model.',
 };
@@ -77,6 +77,7 @@ function ProviderCard({ meta, row, rows, onChanged, onModelsChanged }) {
   const [newModel, setNewModel] = useState('');
   const [modelsNote, setModelsNote] = useState(null); // { ok, text }
   const hasKey = !!row?.has_key;
+  const loadDisabled = busy || !(hasKey || key) || (meta.url === 'required' && !hasKey && !baseUrl.trim());
   const tested = hasKey && !!row?.last_test_ok;
   const acceptedBusy = tested && !!row?.last_test_busy;
   const modelOpts = modelOptions(rows, model);
@@ -126,7 +127,7 @@ function ProviderCard({ meta, row, rows, onChanged, onModelsChanged }) {
     setMsg(null);
     setModelsNote(null);
     try {
-      const { data, error } = await supabase.functions.invoke('test-ai', { body: { provider: meta.id, action: 'list_models' } });
+      const { data, error } = await supabase.functions.invoke('test-ai', { body: { provider: meta.id, action: 'list_models', api_key: key || undefined, base_url: meta.url ? baseUrl.trim() || undefined : undefined } });
       if (error) setModelsNote({ ok: false, text: invokeError(error) });
       else if (data?.ok) {
         const count = Array.isArray(data.models) ? data.models.filter((m) => typeof m === 'string').length : 0;
@@ -190,7 +191,9 @@ function ProviderCard({ meta, row, rows, onChanged, onModelsChanged }) {
           {fallbackOpts.map((o) => <option key={o.id} value={o.id}>{o.label}</option>)}
         </select>
       </Field>
-      {!rows.some((r) => r.is_available) && <p className="hint">Click Load models to fill this list, or add a model name.</p>}
+      {!rows.some((r) => r.is_available) && (
+        <p className="hint">{!hasKey && !key ? 'Paste your API key, then click Load models.' : 'Click Load models to fill this list, or add a model name.'}</p>
+      )}
       <div className="aim-add">
         <input
           className="input"
@@ -215,9 +218,9 @@ function ProviderCard({ meta, row, rows, onChanged, onModelsChanged }) {
       </Field>
       {msg && <p className={`alert${msg.ok ? ' ok' : ''}`} role={msg.ok ? 'status' : 'alert'}>{msg.text}</p>}
       <div className="ai-actions">
-        <button type="submit" className="btn primary" disabled={busy || !model}>{busy ? 'Working…' : 'Save'}</button>
-        <button type="button" className="btn" disabled={busy || !hasKey} onClick={test}>Test</button>
-        <button type="button" className="btn" disabled={busy || !hasKey} onClick={loadModels}>Load models</button>
+        <button type="submit" className="btn primary" disabled={busy || !model} title={!busy && !model ? 'Pick a model first' : undefined}>{busy ? 'Working…' : 'Save'}</button>
+        <button type="button" className="btn" disabled={busy || !hasKey} title={!busy && !hasKey ? 'Save an API key first' : undefined} onClick={test}>Test</button>
+        <button type="button" className="btn" disabled={loadDisabled} title={loadDisabled && !busy ? (meta.url === 'required' && !hasKey && key && !baseUrl.trim() ? 'Enter the Base URL first' : 'Paste an API key first') : undefined} onClick={loadModels}>Load models</button>
         {hasKey && <button type="button" className="btn danger" disabled={busy} onClick={() => setRemoving(true)}>Remove key</button>}
       </div>
       {removing && (

@@ -2,6 +2,7 @@
 // Super Admin only. Never echoes the key; the provider's error text is returned redacted and truncated (plan 08, G1).
 import { createClient } from "npm:@supabase/supabase-js@2";
 import { generateResilient, listModels } from "../_shared/providers.js";
+import { isValidBaseUrl, normalizeBaseUrl } from "../_shared/urlGuard.js";
 import { buildPrompt, sanitizeReview } from "../_shared/prompt.js";
 
 const cors = {
@@ -75,13 +76,19 @@ Deno.serve(async (req) => {
   const action = body?.action ?? "test";
   if (action !== "test" && action !== "list_models") return json({ error: "Valid action required" }, 400);
 
+  // Unsaved key (plan 13, S2): only list_models, used for this one call, never stored or logged.
+  const typedKey = action === "list_models" && typeof body?.api_key === "string" && body.api_key !== "" ? body.api_key : null;
+  if (typedKey !== null && (typedKey.length < 8 || typedKey.length > 400 || /\s/.test(typedKey))) {
+    return json({ ok: false, reason: "auth" });
+  }
+
   // 3. Load the provider's model, base URL and key.
   const { data: runtime, error: rtErr } = await admin.rpc("get_ai_provider_runtime", { p_provider: provider });
   if (rtErr) {
     console.error("test-ai: runtime_failed");
     return json({ error: "Could not load provider" }, 500);
   }
-  if (!runtime) return json({ ok: false, reason: "no_key" });
+  if (!runtime && typedKey === null) return json({ ok: false, reason: "no_key" });
 
   const fail = (e) => {
     const reason = ["auth", "model", "quota", "unavailable", "network", "timeout", "unknown"].includes(e?.kind) ? e.kind : "unknown";
@@ -97,10 +104,16 @@ Deno.serve(async (req) => {
   const timer = setTimeout(() => controller.abort(), action === "list_models" ? LIST_TIMEOUT_MS : TIMEOUT_MS);
   try {
     if (action === "list_models") {
+      let baseUrl = runtime?.base_url;
+      const typedUrl = typeof body?.base_url === "string" ? body.base_url.trim() : "";
+      if (typedUrl !== "" && (provider === "custom" || provider === "openai")) {
+        if (!isValidBaseUrl(typedUrl)) return json({ ok: false, reason: "unknown" });
+        baseUrl = normalizeBaseUrl(typedUrl);
+      }
       const models = await listModels({
-        provider: runtime.provider,
-        base_url: runtime.base_url,
-        api_key: runtime.api_key,
+        provider,
+        base_url: baseUrl,
+        api_key: typedKey ?? runtime.api_key,
         signal: controller.signal,
       });
       const stored = await syncModels(admin, provider, models);
